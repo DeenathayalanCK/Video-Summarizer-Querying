@@ -1,0 +1,25 @@
+# Ignore videos
+data/
+app/data/
+
+# Ignore git
+.git
+.gitignore
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore venv
+.venv/
+venv/
+
+# Ignore logs
+*.log
+
+# Ignore Docker files themselves
+docker-compose.yml
+
+# Ignore VSCode
+.vscode/

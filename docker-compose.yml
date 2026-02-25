@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     container_name: surveillance_postgres
     restart: unless-stopped
     environment:
@@ -44,6 +44,26 @@ services:
       - ./data:/app/data
     working_dir: /app
     command: python main.py
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: surveillance_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app
+      - ./data:/app/data
+    working_dir: /app
+    ports:
+      - "8000:8000"
+    command: uvicorn app.api.app:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
   postgres_data:

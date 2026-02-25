@@ -7,6 +7,7 @@ from app.vision.scene_change import SceneChangeDetector
 from app.captioning.ollama_client import OllamaMultimodalClient
 from app.storage.database import SessionLocal
 from app.storage.repository import EventRepository
+from app.rag.indexer import CaptionIndexer
 from app.core.logging import get_logger
 
 
@@ -18,20 +19,16 @@ class SemanticVideoProcessor:
         self.scene_detector = SceneChangeDetector(
             self.settings.scene_change_threshold
         )
-
         self.captioner = OllamaMultimodalClient()
 
-        # VIDEO_INPUT_PATH is now a folder path directly
+        # VIDEO_INPUT_PATH is a folder path
         self.base_data_dir = self.settings.video_input_path.rstrip("/")
 
     def run(self):
         self.logger.info("semantic_pipeline_started", data_dir=self.base_data_dir)
 
         if not os.path.exists(self.base_data_dir):
-            self.logger.warning(
-                "video_directory_not_found",
-                path=self.base_data_dir
-            )
+            self.logger.warning("video_directory_not_found", path=self.base_data_dir)
             return
 
         video_files = sorted([
@@ -47,16 +44,14 @@ class SemanticVideoProcessor:
 
         for video_file in video_files:
             full_path = os.path.join(self.base_data_dir, video_file)
-
-            self.logger.info("processing_video", video=video_file, path=full_path)
-
+            self.logger.info("processing_video", video=video_file)
             self.scene_detector.reset()
 
             try:
                 sampler = FrameSampler(full_path, self.settings.frame_sample_fps)
-
                 db = SessionLocal()
                 repo = EventRepository(db)
+                indexer = CaptionIndexer(db)
 
                 try:
                     for frame, seconds in sampler:
@@ -65,13 +60,14 @@ class SemanticVideoProcessor:
                             self.logger.info(
                                 "scene_change_detected",
                                 video=video_file,
-                                second=seconds
+                                second=seconds,
                             )
 
                             keyframe_path = self.save_keyframe(frame, video_file, seconds)
                             caption = self.captioner.generate_caption(frame)
 
-                            repo.save_caption(
+                            # Save caption to DB
+                            saved = repo.save_caption(
                                 camera_id=self.settings.camera_id,
                                 video_filename=video_file,
                                 frame_second_offset=seconds,
@@ -80,11 +76,13 @@ class SemanticVideoProcessor:
                                 caption_text=caption,
                             )
 
+                            # Immediately embed + index for semantic search
+                            indexer.index_caption(saved)
+
                             self.logger.info(
-                                "caption_stored",
+                                "caption_stored_and_indexed",
                                 video=video_file,
                                 second=seconds,
-                                keyframe_path=keyframe_path,
                             )
 
                 finally:
@@ -94,7 +92,7 @@ class SemanticVideoProcessor:
                 self.logger.error(
                     "video_processing_failed",
                     video=video_file,
-                    error=str(e)
+                    error=str(e),
                 )
 
         self.logger.info("semantic_pipeline_completed")
@@ -103,12 +101,8 @@ class SemanticVideoProcessor:
         keyframes_root = os.path.join(self.base_data_dir, "keyframes")
         video_stem = os.path.splitext(video_filename)[0]
         video_folder = os.path.join(keyframes_root, video_stem)
-
         os.makedirs(video_folder, exist_ok=True)
-
         filename = f"{round(second, 2)}.jpg"
         full_path = os.path.join(video_folder, filename)
-
         cv2.imwrite(full_path, frame)
-
         return full_path

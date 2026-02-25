@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+import cv2
 
 from app.core.config import get_settings
 from app.vision.frame_sampler import FrameSampler
@@ -21,20 +21,21 @@ class SemanticVideoProcessor:
 
         self.captioner = OllamaMultimodalClient()
 
+        # Base data directory (mounted project root inside container)
+        self.base_data_dir = "/app/app/data"
+
     def run(self):
         self.logger.info("semantic_pipeline_started")
 
-        video_directory = "/app/app/data"
-
-        if not os.path.exists(video_directory):
+        if not os.path.exists(self.base_data_dir):
             self.logger.warning(
                 "video_directory_not_found",
-                path=video_directory
+                path=self.base_data_dir
             )
             return
 
         video_files = [
-            f for f in os.listdir(video_directory)
+            f for f in os.listdir(self.base_data_dir)
             if f.lower().endswith(".mp4")
         ]
 
@@ -43,7 +44,7 @@ class SemanticVideoProcessor:
             return
 
         for video_file in video_files:
-            full_path = os.path.join(video_directory, video_file)
+            full_path = os.path.join(self.base_data_dir, video_file)
 
             self.logger.info(
                 "processing_video",
@@ -56,28 +57,37 @@ class SemanticVideoProcessor:
                     self.settings.frame_sample_fps,
                 )
 
-                for frame, seconds in sampler:
+                db = SessionLocal()
+                repo = EventRepository(db)
 
-                    if self.scene_detector.is_scene_changed(frame):
+                try:
+                    for frame, seconds in sampler:
 
-                        self.logger.info(
-                            "scene_change_detected",
-                            video=video_file,
-                            second=seconds
-                        )
+                        if self.scene_detector.is_scene_changed(frame):
 
-                        caption = self.captioner.generate_caption(frame)
+                            self.logger.info(
+                                "scene_change_detected",
+                                video=video_file,
+                                second=seconds
+                            )
 
-                        db = SessionLocal()
+                            # 1️⃣ Save keyframe to disk
+                            keyframe_path = self.save_keyframe(
+                                frame,
+                                video_file,
+                                seconds
+                            )
 
-                        try:
-                            repo = EventRepository(db)
+                            # 2️⃣ Generate caption
+                            caption = self.captioner.generate_caption(frame)
 
+                            # 3️⃣ Store in DB
                             repo.save_caption(
                                 camera_id=self.settings.camera_id,
                                 video_filename=video_file,
                                 frame_second_offset=seconds,
                                 absolute_timestamp=None,
+                                keyframe_path=keyframe_path,
                                 caption_text=caption,
                             )
 
@@ -85,10 +95,11 @@ class SemanticVideoProcessor:
                                 "caption_stored",
                                 video=video_file,
                                 second=seconds,
+                                keyframe_path=keyframe_path,
                             )
 
-                        finally:
-                            db.close()
+                finally:
+                    db.close()
 
             except Exception as e:
                 self.logger.error(
@@ -98,3 +109,19 @@ class SemanticVideoProcessor:
                 )
 
         self.logger.info("semantic_pipeline_completed")
+
+    def save_keyframe(self, frame, video_filename, second):
+        keyframes_root = os.path.join(self.base_data_dir, "keyframes")
+        video_folder = os.path.join(
+            keyframes_root,
+            video_filename.replace(".mp4", "")
+        )
+
+        os.makedirs(video_folder, exist_ok=True)
+
+        filename = f"{round(second, 2)}.jpg"
+        full_path = os.path.join(video_folder, filename)
+
+        cv2.imwrite(full_path, frame)
+
+        return full_path

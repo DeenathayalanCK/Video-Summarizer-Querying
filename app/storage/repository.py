@@ -44,6 +44,7 @@ class EventRepository:
         video_filename,
         frame_second_offset,
         absolute_timestamp,
+        keyframe_path,
         caption_text,
     ):
         caption = Caption(
@@ -51,6 +52,7 @@ class EventRepository:
             video_filename=video_filename,
             frame_second_offset=frame_second_offset,
             absolute_timestamp=absolute_timestamp,
+            keyframe_path=keyframe_path,
             caption_text=caption_text,
         )
         self.db.add(caption)

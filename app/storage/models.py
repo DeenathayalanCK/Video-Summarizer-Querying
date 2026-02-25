@@ -56,6 +56,7 @@ class Caption(Base):
     absolute_timestamp = Column(DateTime, nullable=True)
     caption_text = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    keyframe_path = Column(String, nullable=False)
     
 # Composite index for faster camera + time queries
 Index(

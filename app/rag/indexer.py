@@ -1,7 +1,8 @@
 from sqlalchemy.orm import Session
 
 from app.storage.models import Caption, CaptionEmbedding
-from app.rag.embedder import OllamaEmbedder, EMBEDDING_MODEL
+from app.rag.embedder import OllamaEmbedder
+from app.core.config import get_settings
 from app.core.logging import get_logger
 
 
@@ -14,22 +15,19 @@ class CaptionIndexer:
     def __init__(self, db: Session):
         self.db = db
         self.embedder = OllamaEmbedder()
+        self.settings = get_settings()
         self.logger = get_logger()
 
     def index_caption(self, caption: Caption) -> CaptionEmbedding:
         """Embed a single caption and store the vector."""
 
-        # Skip if already embedded
         existing = (
             self.db.query(CaptionEmbedding)
             .filter(CaptionEmbedding.caption_id == caption.id)
             .first()
         )
         if existing:
-            self.logger.info(
-                "caption_already_indexed",
-                caption_id=str(caption.id),
-            )
+            self.logger.info("caption_already_indexed", caption_id=str(caption.id))
             return existing
 
         vector = self.embedder.embed(caption.caption_text)
@@ -37,7 +35,7 @@ class CaptionIndexer:
         emb = CaptionEmbedding(
             caption_id=caption.id,
             embedding=vector,
-            model_name=EMBEDDING_MODEL,
+            model_name=self.settings.embed_model,  # read from settings, not hardcoded
         )
 
         self.db.add(emb)
@@ -54,10 +52,7 @@ class CaptionIndexer:
         return emb
 
     def index_all_unindexed(self) -> int:
-        """
-        Find all captions that have no embedding yet and index them.
-        Useful for re-indexing after a model change.
-        """
+        """Find all captions with no embedding and index them."""
         unindexed = (
             self.db.query(Caption)
             .outerjoin(CaptionEmbedding, CaptionEmbedding.caption_id == Caption.id)

@@ -12,14 +12,15 @@ class QAEngine:
     Full RAG pipeline:
       1. Retrieve top-K relevant captions via semantic search
       2. Format them as context
-      3. Ask Ollama to answer the user's question grounded in that context
+      3. Ask the text LLM to answer grounded in that context
     """
 
     def __init__(self, db: Session):
         self.settings = get_settings()
         self.logger = get_logger()
         self.retriever = CaptionRetriever(db)
-        self.model = self.settings.multimodal_model
+        # Uses TEXT_MODEL (e.g. llama3.2) — not the vision model
+        self.model = self.settings.text_model
 
     def ask(
         self,
@@ -29,11 +30,7 @@ class QAEngine:
         min_second: float = None,
         max_second: float = None,
     ) -> dict:
-        """
-        Answer a natural language question grounded in retrieved captions.
-        Returns the answer plus the supporting captions used as context.
-        """
-        self.logger.info("qa_engine_asked", question=question)
+        self.logger.info("qa_engine_asked", question=question, model=self.model)
 
         # Step 1 — Retrieve relevant captions
         hits = self.retriever.search(
@@ -50,14 +47,14 @@ class QAEngine:
                 "sources": [],
             }
 
-        # Step 2 — Format context block
+        # Step 2 — Format context
         context_lines = [
             f"[{hit['video_filename']} @ {hit['second']:.1f}s] {hit['caption']}"
             for hit in hits
         ]
         context = "\n".join(context_lines)
 
-        # Step 3 — Build prompt
+        # Step 3 — Ask text LLM
         user_message = QA_USER_TEMPLATE.format(
             captions=context,
             question=question,
@@ -78,8 +75,7 @@ class QAEngine:
         response.raise_for_status()
 
         answer = response.json()["response"]
-
-        self.logger.info("qa_engine_answered", question=question)
+        self.logger.info("qa_engine_answered", model=self.model)
 
         return {
             "answer": answer,

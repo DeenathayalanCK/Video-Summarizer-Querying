@@ -16,11 +16,20 @@ class Settings(BaseSettings):
     service_name: str = Field(..., alias="SERVICE_NAME")
 
     ollama_host: str = Field(..., alias="OLLAMA_HOST")
+
+    # Vision model — used for frame captioning (must be multimodal)
     multimodal_model: str = Field(..., alias="MULTIMODAL_MODEL")
+
+    # Text model — used for Q&A and summarization (text-only LLM)
+    text_model: str = Field(..., alias="TEXT_MODEL")
+
+    # Embedding model — used for semantic search indexing
+    embed_model: str = Field(..., alias="EMBED_MODEL")
+
     frame_sample_fps: int = Field(..., alias="FRAME_SAMPLE_FPS")
     scene_change_threshold: float = Field(..., alias="SCENE_CHANGE_THRESHOLD")
 
-    video_input_path: str = Field(..., alias="VIDEO_INPUT_PATH")  # now a folder path
+    video_input_path: str = Field(..., alias="VIDEO_INPUT_PATH")
     camera_id: str = Field(..., alias="CAMERA_ID")
 
     @property

@@ -44,36 +44,33 @@ def wait_for_ollama(logger):
 
 
 def ensure_pgvector(logger):
-    """Enable pgvector extension — must run before any vector columns are used."""
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         conn.commit()
     logger.info("pgvector_extension_ready")
 
 
-def pull_embedding_model(logger):
-    """
-    Pull nomic-embed-text if not already present.
-    Ollama pull is idempotent — safe to call every startup.
-    """
+def pull_model(logger, model_name: str):
+    """Pull a model from Ollama if not already present. Idempotent."""
     settings = get_settings()
-    logger.info("pulling_embedding_model", model="nomic-embed-text")
+    logger.info("pulling_model", model=model_name)
     try:
         response = requests.post(
             f"{settings.ollama_host}/api/pull",
-            json={"name": "nomic-embed-text", "stream": False},
-            timeout=300,
+            json={"name": model_name, "stream": False},
+            timeout=600,
         )
         response.raise_for_status()
-        logger.info("embedding_model_ready", model="nomic-embed-text")
+        logger.info("model_ready", model=model_name)
     except Exception as e:
-        logger.error("embedding_model_pull_failed", error=str(e))
+        logger.error("model_pull_failed", model=model_name, error=str(e))
         raise
 
 
 def main():
     setup_logging()
     logger = get_logger()
+    settings = get_settings()
 
     logger.info("starting_application")
 
@@ -86,7 +83,11 @@ def main():
     logger.info("database_tables_initialized")
 
     wait_for_ollama(logger)
-    pull_embedding_model(logger)
+
+    # Pull all required models — idempotent, skips if already present
+    pull_model(logger, settings.multimodal_model)   # llava:7b  — for captioning
+    pull_model(logger, settings.embed_model)         # nomic-embed-text — for search
+    pull_model(logger, settings.text_model)          # llama3.2 — for Q&A
 
     logger.info("semantic_pipeline_initializing")
     processor = SemanticVideoProcessor()

@@ -40,13 +40,13 @@ class EventRepository:
 
     def save_caption(
         self,
-        camera_id,
-        video_filename,
-        frame_second_offset,
-        absolute_timestamp,
-        keyframe_path,
-        caption_text,
-    ):
+        camera_id: str,
+        video_filename: str,
+        frame_second_offset: float,
+        absolute_timestamp: Optional[datetime],
+        keyframe_path: str,
+        caption_text: str,
+    ) -> Caption:
         caption = Caption(
             camera_id=camera_id,
             video_filename=video_filename,
@@ -57,3 +57,6 @@ class EventRepository:
         )
         self.db.add(caption)
         self.db.commit()
+        self.db.refresh(caption)   # fix: ensure object is not stale after commit
+
+        return caption

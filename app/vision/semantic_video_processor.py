@@ -21,11 +21,11 @@ class SemanticVideoProcessor:
 
         self.captioner = OllamaMultimodalClient()
 
-        # Base data directory (mounted project root inside container)
-        self.base_data_dir = "/app/app/data"
+        # VIDEO_INPUT_PATH is now a folder path directly
+        self.base_data_dir = self.settings.video_input_path.rstrip("/")
 
     def run(self):
-        self.logger.info("semantic_pipeline_started")
+        self.logger.info("semantic_pipeline_started", data_dir=self.base_data_dir)
 
         if not os.path.exists(self.base_data_dir):
             self.logger.warning(
@@ -34,35 +34,32 @@ class SemanticVideoProcessor:
             )
             return
 
-        video_files = [
+        video_files = sorted([
             f for f in os.listdir(self.base_data_dir)
             if f.lower().endswith(".mp4")
-        ]
+        ])
 
         if not video_files:
-            self.logger.warning("no_videos_found")
+            self.logger.warning("no_videos_found", path=self.base_data_dir)
             return
+
+        self.logger.info("videos_discovered", count=len(video_files), files=video_files)
 
         for video_file in video_files:
             full_path = os.path.join(self.base_data_dir, video_file)
 
-            self.logger.info(
-                "processing_video",
-                video=video_file
-            )
+            self.logger.info("processing_video", video=video_file, path=full_path)
+
+            self.scene_detector.reset()
 
             try:
-                sampler = FrameSampler(
-                    full_path,
-                    self.settings.frame_sample_fps,
-                )
+                sampler = FrameSampler(full_path, self.settings.frame_sample_fps)
 
                 db = SessionLocal()
                 repo = EventRepository(db)
 
                 try:
                     for frame, seconds in sampler:
-
                         if self.scene_detector.is_scene_changed(frame):
 
                             self.logger.info(
@@ -71,17 +68,9 @@ class SemanticVideoProcessor:
                                 second=seconds
                             )
 
-                            # 1️⃣ Save keyframe to disk
-                            keyframe_path = self.save_keyframe(
-                                frame,
-                                video_file,
-                                seconds
-                            )
-
-                            # 2️⃣ Generate caption
+                            keyframe_path = self.save_keyframe(frame, video_file, seconds)
                             caption = self.captioner.generate_caption(frame)
 
-                            # 3️⃣ Store in DB
                             repo.save_caption(
                                 camera_id=self.settings.camera_id,
                                 video_filename=video_file,
@@ -112,10 +101,8 @@ class SemanticVideoProcessor:
 
     def save_keyframe(self, frame, video_filename, second):
         keyframes_root = os.path.join(self.base_data_dir, "keyframes")
-        video_folder = os.path.join(
-            keyframes_root,
-            video_filename.replace(".mp4", "")
-        )
+        video_stem = os.path.splitext(video_filename)[0]
+        video_folder = os.path.join(keyframes_root, video_stem)
 
         os.makedirs(video_folder, exist_ok=True)
 

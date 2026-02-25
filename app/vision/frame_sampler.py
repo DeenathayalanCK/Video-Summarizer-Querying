@@ -16,15 +16,13 @@ class FrameSampler:
                 f"Invalid FPS detected for video: {video_path}"
             )
 
-        self.sample_fps = sample_fps
-
         if sample_fps <= 0:
             raise ValueError("sample_fps must be greater than 0")
 
+        self.sample_fps = sample_fps
         self.frame_interval = max(
             int(self.original_fps / sample_fps), 1
         )
-
         self.frame_count = 0
 
     def __iter__(self):
@@ -35,7 +33,7 @@ class FrameSampler:
             ret, frame = self.cap.read()
 
             if not ret:
-                self.cap.release()
+                self._release()
                 raise StopIteration
 
             self.frame_count += 1
@@ -44,5 +42,12 @@ class FrameSampler:
                 timestamp_sec = (
                     self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
                 )
-
                 return frame, float(timestamp_sec)
+
+    def _release(self):
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+
+    def __del__(self):
+        """Ensure the video capture is always released, even on exceptions."""
+        self._release()

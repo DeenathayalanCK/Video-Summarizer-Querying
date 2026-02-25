@@ -1,16 +1,16 @@
 CAPTION_PROMPT = """
-You are analyzing a surveillance camera frame.
+You are analyzing a video frame.
 
-Describe what is happening in this scene concisely and factually.
+Describe what is visible in this frame concisely and factually.
 
 Focus on:
-- People
-- Vehicles
-- Movement
-- Environmental changes
-- Unusual or suspicious elements
+- Objects and their positions
+- People or animals present
+- Actions or movement occurring
+- Environmental or lighting conditions
+- Any notable changes from a typical static scene
 
 Do not speculate.
 Do not invent details.
-Be objective.
+Be objective and specific.
 """

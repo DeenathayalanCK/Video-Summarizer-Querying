@@ -11,6 +11,11 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U surveillance_user -d surveillance_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   ollama:
     image: ollama/ollama
@@ -27,12 +32,16 @@ services:
       dockerfile: docker/Dockerfile
     container_name: surveillance_app
     depends_on:
-      - postgres
-      - ollama
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
     env_file:
       - .env
     volumes:
-      - .:/app
+      - ./app:/app/app
+      - ./main.py:/app/main.py
+      - ./data:/app/data
     working_dir: /app
     command: python main.py
 

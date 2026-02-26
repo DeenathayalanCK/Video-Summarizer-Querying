@@ -35,7 +35,7 @@ services:
     # Pipeline runs once per invocation — restart would cause infinite reprocessing
     restart: "no"
     # Give SIGTERM handler time to save state before Docker force-kills
-    stop_grace_period: 60s
+    stop_grace_period: 10s
     depends_on:
       postgres:
         condition: service_healthy

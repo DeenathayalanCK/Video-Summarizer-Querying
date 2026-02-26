@@ -735,79 +735,88 @@
 
           if (!data.statuses.length) {
             el.innerHTML = '<div class="text-gray-600">No jobs yet</div>';
-            return;
+            // Keep polling — pipeline may not have registered jobs yet
+            // Do NOT return here before the allDone check (old bug)
+          } else {
+            const colors = {
+              completed: "text-green-400",
+              running: "text-yellow-400",
+              failed: "text-red-400",
+              pending: "text-gray-500",
+              skipped: "text-gray-600",
+            };
+
+            el.innerHTML = data.statuses
+              .map((s) => {
+                const color = colors[s.status] || "text-gray-400";
+                const pct =
+                  s.progress_pct != null ? " " + s.progress_pct + "%" : "";
+                const errMsg = s.last_error
+                  ? s.last_error.slice(0, 50) + "..."
+                  : "";
+                const err = s.last_error
+                  ? '<div class="text-red-500 truncate" title="' +
+                    s.last_error +
+                    '">⚠ ' +
+                    errMsg +
+                    "</div>"
+                  : "";
+                const bar =
+                  s.status === "running" && s.progress_pct != null
+                    ? '<div class="w-full bg-gray-800 rounded-full h-1 mt-1"><div class="bg-yellow-400 h-1 rounded-full" style="width:' +
+                      s.progress_pct +
+                      '%"></div></div>'
+                    : "";
+                return (
+                  '<div class="glass rounded-lg p-2">' +
+                  '<div class="flex justify-between items-center">' +
+                  '<span class="truncate font-medium" style="max-width:120px" title="' +
+                  s.video_filename +
+                  '">' +
+                  s.video_filename +
+                  "</span>" +
+                  '<span class="' +
+                  color +
+                  ' font-mono">' +
+                  s.status +
+                  pct +
+                  "</span>" +
+                  "</div>" +
+                  '<div class="text-gray-600 mt-0.5">' +
+                  s.scenes_captioned +
+                  "/" +
+                  s.scenes_detected +
+                  " scenes" +
+                  (s.current_second != null
+                    ? " @ " + s.current_second.toFixed(1) + "s"
+                    : "") +
+                  "</div>" +
+                  bar +
+                  err +
+                  "</div>"
+                );
+              })
+              .join("");
           }
 
-          const colors = {
-            completed: "text-green-400",
-            running: "text-yellow-400",
-            failed: "text-red-400",
-            pending: "text-gray-500",
-            skipped: "text-gray-600",
-          };
-
-          el.innerHTML = data.statuses
-            .map((s) => {
-              const color = colors[s.status] || "text-gray-400";
-              const pct =
-                s.progress_pct != null ? " " + s.progress_pct + "%" : "";
-              const errMsg = s.last_error
-                ? s.last_error.slice(0, 50) + "..."
-                : "";
-              const err = s.last_error
-                ? '<div class="text-red-500 truncate" title="' +
-                  s.last_error +
-                  '">⚠ ' +
-                  errMsg +
-                  "</div>"
-                : "";
-              const bar =
-                s.status === "running" && s.progress_pct != null
-                  ? '<div class="w-full bg-gray-800 rounded-full h-1 mt-1"><div class="bg-yellow-400 h-1 rounded-full" style="width:' +
-                    s.progress_pct +
-                    '%"></div></div>'
-                  : "";
-              return (
-                '<div class="glass rounded-lg p-2"><div class="flex justify-between items-center"><span class="truncate font-medium" style="max-width:120px" title="' +
-                s.video_filename +
-                '">' +
-                s.video_filename +
-                '</span><span class="' +
-                color +
-                ' font-mono">' +
-                s.status +
-                pct +
-                '</span></div><div class="text-gray-600 mt-0.5">' +
-                s.scenes_captioned +
-                "/" +
-                s.scenes_detected +
-                " scenes" +
-                (s.current_second != null
-                  ? " @ " + s.current_second.toFixed(1) + "s"
-                  : "") +
-                "</div>" +
-                bar +
-                err +
-                "</div>"
-              );
-            })
-            .join("");
-
-          // Stop polling once every job is in a terminal state — no more requests needed
-          const allDone = data.statuses.every((s) =>
-            TERMINAL_STATES.has(s.status),
-          );
+          // FIXED: only stop when jobs exist AND every one is terminal.
+          // hasJobs guard prevents [].every() = true from killing the timer
+          // before the pipeline has even started registering work.
+          const hasJobs = data.statuses.length > 0;
+          const allDone =
+            hasJobs &&
+            data.statuses.every((s) => TERMINAL_STATES.has(s.status));
           if (allDone && _pollTimer !== null) {
             clearInterval(_pollTimer);
             _pollTimer = null;
           }
         } catch (e) {
-          /* non-critical */
+          /* non-critical — network blip, keep polling */
         }
       }
 
       function startStatusPolling() {
-        pollPipelineStatus(); // immediate first call
+        pollPipelineStatus();
         _pollTimer = setInterval(pollPipelineStatus, 5000);
       }
 

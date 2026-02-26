@@ -1,5 +1,6 @@
 import os
 import signal
+import numpy as np
 import cv2
 
 from app.core.config import get_settings
@@ -57,22 +58,13 @@ class SemanticVideoProcessor:
 
     def _warmup_model(self):
         """
-        Send a tiny 1x1 black image to the vision model before processing starts.
-        Forces Ollama to load the model weights into memory so the first real
+        Send a tiny blank frame to the vision model before processing starts.
+        Forces Ollama to load model weights into RAM so the first real
         frame doesn't pay the cold-start penalty (4-8 min on CPU for minicpm-v).
         """
         self.logger.info("model_warmup_starting", model=self.settings.multimodal_model)
         try:
-            blank = cv2.imencode(
-                ".jpg",
-                cv2.resize(
-                    cv2.imread.__class__  # just need any numpy array
-                    if False else
-                    __import__("numpy").zeros((8, 8, 3), dtype=__import__("numpy").uint8),
-                    (8, 8)
-                )
-            )
-            import numpy as np
+            # FIX: clean numpy warmup — no dead code, no inline __import__ hacks
             blank_frame = np.zeros((8, 8, 3), dtype=np.uint8)
             self.captioner.generate_caption(blank_frame)
             self.logger.info("model_warmup_complete", model=self.settings.multimodal_model)

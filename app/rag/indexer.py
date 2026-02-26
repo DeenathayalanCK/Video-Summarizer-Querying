@@ -35,7 +35,7 @@ class CaptionIndexer:
         emb = CaptionEmbedding(
             caption_id=caption.id,
             embedding=vector,
-            model_name=self.settings.embed_model,  # read from settings, not hardcoded
+            model_name=self.settings.embed_model,
         )
 
         self.db.add(emb)

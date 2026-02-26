@@ -60,6 +60,7 @@ services:
     volumes:
       - ./app:/app/app
       - ./data:/app/data
+      - ./static:/app/static # serves the UI
     working_dir: /app
     ports:
       - "8000:8000"

@@ -59,10 +59,6 @@ class Caption(Base):
 
 
 class CaptionEmbedding(Base):
-    """
-    Stores the vector embedding for each caption.
-    Kept separate from captions so the embedding model can be swapped freely.
-    """
     __tablename__ = "caption_embeddings"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -73,7 +69,6 @@ class CaptionEmbedding(Base):
         unique=True,
         index=True,
     )
-    # nomic-embed-text produces 768-dim vectors
     embedding = Column(Vector(768), nullable=False)
     model_name = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -81,6 +76,26 @@ class CaptionEmbedding(Base):
     caption = relationship("Caption", back_populates="embedding")
 
 
+class VideoSummary(Base):
+    """
+    Stores the generated summary for a processed video.
+    One row per video_filename + camera_id combination.
+    Regenerated if captions change (tracked via caption_count).
+    """
+    __tablename__ = "video_summaries"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    video_filename = Column(String, nullable=False, index=True)
+    camera_id = Column(String, nullable=False)
+    summary_text = Column(Text, nullable=False)
+    caption_count = Column(Integer, nullable=False)   # how many captions were used
+    duration_seconds = Column(Float, nullable=False)  # last caption timestamp
+    model_name = Column(String, nullable=False)        # which text model generated it
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # Indexes
 Index("idx_camera_time", Event.camera_id, Event.event_timestamp)
 Index("idx_caption_video", Caption.video_filename, Caption.frame_second_offset)
+Index("idx_summary_video", VideoSummary.video_filename, VideoSummary.camera_id)

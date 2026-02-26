@@ -8,6 +8,7 @@ from app.captioning.ollama_client import OllamaMultimodalClient
 from app.storage.database import SessionLocal
 from app.storage.repository import EventRepository
 from app.rag.indexer import CaptionIndexer
+from app.rag.summarizer import VideoSummarizer
 from app.core.logging import get_logger
 
 
@@ -15,13 +16,8 @@ class SemanticVideoProcessor:
     def __init__(self):
         self.settings = get_settings()
         self.logger = get_logger()
-
-        self.scene_detector = SceneChangeDetector(
-            self.settings.scene_change_threshold
-        )
+        self.scene_detector = SceneChangeDetector(self.settings.scene_change_threshold)
         self.captioner = OllamaMultimodalClient()
-
-        # VIDEO_INPUT_PATH is a folder path
         self.base_data_dir = self.settings.video_input_path.rstrip("/")
 
     def run(self):
@@ -56,7 +52,6 @@ class SemanticVideoProcessor:
                 try:
                     for frame, seconds in sampler:
                         if self.scene_detector.is_scene_changed(frame):
-
                             self.logger.info(
                                 "scene_change_detected",
                                 video=video_file,
@@ -66,7 +61,6 @@ class SemanticVideoProcessor:
                             keyframe_path = self.save_keyframe(frame, video_file, seconds)
                             caption = self.captioner.generate_caption(frame)
 
-                            # Save caption to DB
                             saved = repo.save_caption(
                                 camera_id=self.settings.camera_id,
                                 video_filename=video_file,
@@ -76,7 +70,6 @@ class SemanticVideoProcessor:
                                 caption_text=caption,
                             )
 
-                            # Immediately embed + index for semantic search
                             indexer.index_caption(saved)
 
                             self.logger.info(
@@ -84,6 +77,12 @@ class SemanticVideoProcessor:
                                 video=video_file,
                                 second=seconds,
                             )
+
+                    # All frames done — auto-generate summary
+                    self.logger.info("generating_video_summary", video=video_file)
+                    summarizer = VideoSummarizer(db)
+                    summarizer.summarize(video_file)
+                    self.logger.info("video_summary_complete", video=video_file)
 
                 finally:
                     db.close()

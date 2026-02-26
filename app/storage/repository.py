@@ -1,6 +1,7 @@
 from typing import Optional
 from sqlalchemy.orm import Session
-from app.storage.models import Caption, Event
+from sqlalchemy import func
+from app.storage.models import Caption, Event, VideoSummary
 from datetime import datetime
 
 
@@ -31,11 +32,9 @@ class EventRepository:
             event_metadata=metadata,
             schema_version=schema_version,
         )
-
         self.db.add(event)
         self.db.commit()
         self.db.refresh(event)
-
         return event
 
     def save_caption(
@@ -57,6 +56,24 @@ class EventRepository:
         )
         self.db.add(caption)
         self.db.commit()
-        self.db.refresh(caption)   # fix: ensure object is not stale after commit
-
+        self.db.refresh(caption)
         return caption
+
+    def get_summary(
+        self, video_filename: str, camera_id: str
+    ) -> Optional[VideoSummary]:
+        return (
+            self.db.query(VideoSummary)
+            .filter(
+                VideoSummary.video_filename == video_filename,
+                VideoSummary.camera_id == camera_id,
+            )
+            .first()
+        )
+
+    def list_summaries(self) -> list[VideoSummary]:
+        return (
+            self.db.query(VideoSummary)
+            .order_by(VideoSummary.video_filename)
+            .all()
+        )

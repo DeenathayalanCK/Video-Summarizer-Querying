@@ -1,6 +1,6 @@
+import re
 import requests
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -8,15 +8,51 @@ from app.storage.models import Caption, VideoSummary
 from app.prompts.summary_prompt import SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_TEMPLATE
 
 
+def _extract_section(text: str, section: str) -> str:
+    """
+    Pull a specific section out of a structured caption.
+    Returns the content after the section header up to the next header.
+    """
+    pattern = rf"{section}:\s*(.*?)(?=\n[A-Z ]+:|$)"
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def _condense_caption(caption_text: str) -> str:
+    """
+    Distill a full structured caption down to the 3 fields that matter
+    for cross-caption temporal reasoning:
+      - SUBJECTS (who/what is present)
+      - SPATIAL LAYOUT (where they are)
+      - ANOMALIES (anything unusual)
+
+    This strips IMAGE QUALITY NOTES and verbose SCENE text that dilute
+    the LLM's attention when comparing across many captions.
+    """
+    subjects = _extract_section(caption_text, "SUBJECTS")
+    spatial = _extract_section(caption_text, "SPATIAL LAYOUT")
+    anomalies = _extract_section(caption_text, "ANOMALIES")
+
+    # If extraction failed (old-format captions), return truncated original
+    if not subjects and not spatial:
+        return caption_text[:400]
+
+    parts = []
+    if subjects and subjects.lower() not in ("none observed.", "none observed"):
+        parts.append(f"PRESENT: {subjects}")
+    else:
+        parts.append("PRESENT: Nothing/nobody")
+    if spatial and spatial.lower() not in ("none observed.", "none observed"):
+        parts.append(f"POSITION: {spatial}")
+    if anomalies and anomalies.lower() not in ("none observed.", "none observed"):
+        parts.append(f"ANOMALY: {anomalies}")
+
+    return " | ".join(parts)
+
+
 class VideoSummarizer:
-    """
-    Generates a structured summary for a video by passing all its
-    chronologically-ordered captions to the text LLM.
-
-    Summaries are cached in the VideoSummary table and only regenerated
-    when the caption count changes (i.e. new frames were indexed).
-    """
-
     def __init__(self, db: Session):
         self.db = db
         self.settings = get_settings()
@@ -24,11 +60,6 @@ class VideoSummarizer:
         self.model = self.settings.text_model
 
     def summarize(self, video_filename: str, force: bool = False) -> VideoSummary:
-        """
-        Generate and store a summary for the given video.
-        Returns cached summary if caption count hasn't changed, unless force=True.
-        """
-        # Fetch all captions in chronological order
         captions = (
             self.db.query(Caption)
             .filter(Caption.video_filename == video_filename)
@@ -43,7 +74,6 @@ class VideoSummarizer:
         camera_id = captions[0].camera_id
         duration = captions[-1].frame_second_offset
 
-        # Check for existing summary
         existing = (
             self.db.query(VideoSummary)
             .filter(
@@ -53,28 +83,19 @@ class VideoSummarizer:
             .first()
         )
 
-        # Return cached if caption count unchanged and not forced
         if existing and existing.caption_count == caption_count and not force:
-            self.logger.info(
-                "summary_cache_hit",
-                video=video_filename,
-                caption_count=caption_count,
-            )
+            self.logger.info("summary_cache_hit", video=video_filename)
             return existing
 
-        self.logger.info(
-            "generating_summary",
-            video=video_filename,
-            caption_count=caption_count,
-            model=self.model,
-        )
+        self.logger.info("generating_summary", video=video_filename,
+                         caption_count=caption_count, model=self.model)
 
-        # Build caption block
+        # Build condensed caption block for temporal reasoning
         caption_lines = [
-            f"[{c.frame_second_offset:.1f}s]\n{c.caption_text}"
+            f"[{c.frame_second_offset:.1f}s] {_condense_caption(c.caption_text)}"
             for c in captions
         ]
-        captions_block = "\n\n".join(caption_lines)
+        captions_block = "\n".join(caption_lines)
 
         user_message = SUMMARY_USER_TEMPLATE.format(
             video_filename=video_filename,
@@ -94,13 +115,12 @@ class VideoSummarizer:
         response = requests.post(
             f"{self.settings.ollama_host}/api/generate",
             json=payload,
-            timeout=300,   # summaries can be slow for long videos
+            timeout=600,
         )
         response.raise_for_status()
 
         summary_text = response.json()["response"]
 
-        # Upsert — update if exists, insert if not
         if existing:
             existing.summary_text = summary_text
             existing.caption_count = caption_count
@@ -124,33 +144,20 @@ class VideoSummarizer:
             self.db.refresh(summary)
             result = summary
 
-        self.logger.info(
-            "summary_generated",
-            video=video_filename,
-            caption_count=caption_count,
-        )
-
+        self.logger.info("summary_generated", video=video_filename)
         return result
 
     def summarize_all(self, force: bool = False) -> list[VideoSummary]:
-        """Generate summaries for every video that has captions."""
         videos = (
             self.db.query(Caption.video_filename)
             .distinct()
             .order_by(Caption.video_filename)
             .all()
         )
-
         results = []
         for (video_filename,) in videos:
             try:
-                summary = self.summarize(video_filename, force=force)
-                results.append(summary)
+                results.append(self.summarize(video_filename, force=force))
             except Exception as e:
-                self.logger.error(
-                    "summary_failed",
-                    video=video_filename,
-                    error=str(e),
-                )
-
+                self.logger.error("summary_failed", video=video_filename, error=str(e))
         return results

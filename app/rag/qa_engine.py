@@ -4,22 +4,15 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.rag.retriever import CaptionRetriever
+from app.rag.summarizer import _condense_caption
 from app.prompts.qa_prompt import QA_SYSTEM_PROMPT, QA_USER_TEMPLATE
 
 
 class QAEngine:
-    """
-    Full RAG pipeline:
-      1. Retrieve top-K relevant captions via semantic search
-      2. Format them as context
-      3. Ask the text LLM to answer grounded in that context
-    """
-
     def __init__(self, db: Session):
         self.settings = get_settings()
         self.logger = get_logger()
         self.retriever = CaptionRetriever(db)
-        # Uses TEXT_MODEL (e.g. llama3.2) — not the vision model
         self.model = self.settings.text_model
 
     def ask(
@@ -32,7 +25,6 @@ class QAEngine:
     ) -> dict:
         self.logger.info("qa_engine_asked", question=question, model=self.model)
 
-        # Step 1 — Retrieve relevant captions
         hits = self.retriever.search(
             query=question,
             video_filename=video_filename,
@@ -47,37 +39,50 @@ class QAEngine:
                 "sources": [],
             }
 
-        # Step 2 — Format context
+        # For QA, also fetch the full timeline of each involved video
+        # so the LLM has sequential context to reason across, not just
+        # the top-K semantically similar hits (which may all be similar frames)
+        from app.storage.models import Caption
+        from sqlalchemy import asc
+
+        involved_videos = list({h["video_filename"] for h in hits})
+        timeline_captions = []
+
+        for vf in involved_videos:
+            rows = (
+                self.retriever.db.query(Caption)
+                .filter(Caption.video_filename == vf)
+                .order_by(asc(Caption.frame_second_offset))
+                .all()
+            )
+            for r in rows:
+                timeline_captions.append((vf, r.frame_second_offset, r.caption_text))
+
+        # Sort by video then time
+        timeline_captions.sort(key=lambda x: (x[0], x[1]))
+
+        # Build condensed sequential context
         context_lines = [
-            f"[{hit['video_filename']} @ {hit['second']:.1f}s] {hit['caption']}"
-            for hit in hits
+            f"[{vf} @ {sec:.1f}s] {_condense_caption(cap)}"
+            for vf, sec, cap in timeline_captions
         ]
         context = "\n".join(context_lines)
-
-        # Step 3 — Ask text LLM
-        user_message = QA_USER_TEMPLATE.format(
-            captions=context,
-            question=question,
-        )
 
         payload = {
             "model": self.model,
             "system": QA_SYSTEM_PROMPT,
-            "prompt": user_message,
+            "prompt": QA_USER_TEMPLATE.format(captions=context, question=question),
             "stream": False,
         }
 
         response = requests.post(
             f"{self.settings.ollama_host}/api/generate",
             json=payload,
-            timeout=120,
+            timeout=600,
         )
         response.raise_for_status()
 
         answer = response.json()["response"]
         self.logger.info("qa_engine_answered", model=self.model)
 
-        return {
-            "answer": answer,
-            "sources": hits,
-        }
+        return {"answer": answer, "sources": hits}

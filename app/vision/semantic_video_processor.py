@@ -16,7 +16,12 @@ class SemanticVideoProcessor:
     def __init__(self):
         self.settings = get_settings()
         self.logger = get_logger()
-        self.scene_detector = SceneChangeDetector(self.settings.scene_change_threshold)
+        self.scene_detector = SceneChangeDetector(
+            threshold=self.settings.scene_change_threshold,
+            long_window_seconds=self.settings.scene_long_window_seconds,
+            long_window_threshold=self.settings.scene_long_window_threshold,
+            cooldown_seconds=self.settings.scene_cooldown_seconds,
+        )
         self.captioner = OllamaMultimodalClient()
         self.base_data_dir = self.settings.video_input_path.rstrip("/")
 
@@ -51,12 +56,9 @@ class SemanticVideoProcessor:
 
                 try:
                     for frame, seconds in sampler:
-                        if self.scene_detector.is_scene_changed(frame):
-                            self.logger.info(
-                                "scene_change_detected",
-                                video=video_file,
-                                second=seconds,
-                            )
+                        # Pass current_second so cooldown works correctly
+                        if self.scene_detector.is_scene_changed(frame, current_second=seconds):
+                            self.logger.info("scene_change_detected", video=video_file, second=seconds)
 
                             keyframe_path = self.save_keyframe(frame, video_file, seconds)
                             caption = self.captioner.generate_caption(frame)
@@ -71,28 +73,18 @@ class SemanticVideoProcessor:
                             )
 
                             indexer.index_caption(saved)
+                            self.logger.info("caption_stored_and_indexed", video=video_file, second=seconds)
 
-                            self.logger.info(
-                                "caption_stored_and_indexed",
-                                video=video_file,
-                                second=seconds,
-                            )
-
-                    # All frames done — auto-generate summary
+                    # Auto-summarize after all frames
                     self.logger.info("generating_video_summary", video=video_file)
-                    summarizer = VideoSummarizer(db)
-                    summarizer.summarize(video_file)
+                    VideoSummarizer(db).summarize(video_file)
                     self.logger.info("video_summary_complete", video=video_file)
 
                 finally:
                     db.close()
 
             except Exception as e:
-                self.logger.error(
-                    "video_processing_failed",
-                    video=video_file,
-                    error=str(e),
-                )
+                self.logger.error("video_processing_failed", video=video_file, error=str(e))
 
         self.logger.info("semantic_pipeline_completed")
 

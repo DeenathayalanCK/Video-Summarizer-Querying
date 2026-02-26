@@ -31,6 +31,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     container_name: surveillance_app
+    # no: do NOT restart after clean exit (code 0)
+    # Pipeline runs once per invocation — restart would cause infinite reprocessing
+    restart: "no"
+    # Give SIGTERM handler time to save state before Docker force-kills
+    stop_grace_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,6 +55,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     container_name: surveillance_api
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,7 +66,7 @@ services:
     volumes:
       - ./app:/app/app
       - ./data:/app/data
-      - ./static:/app/static # serves the UI
+      - ./static:/app/static
     working_dir: /app
     ports:
       - "8000:8000"

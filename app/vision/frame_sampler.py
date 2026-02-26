@@ -10,20 +10,20 @@ class FrameSampler:
             raise RuntimeError(f"Failed to open video: {video_path}")
 
         self.original_fps = self.cap.get(cv2.CAP_PROP_FPS)
-
         if not self.original_fps or self.original_fps <= 0:
-            raise RuntimeError(
-                f"Invalid FPS detected for video: {video_path}"
-            )
+            raise RuntimeError(f"Invalid FPS detected for video: {video_path}")
 
         if sample_fps <= 0:
             raise ValueError("sample_fps must be greater than 0")
 
         self.sample_fps = sample_fps
-        self.frame_interval = max(
-            int(self.original_fps / sample_fps), 1
-        )
+        self.frame_interval = max(int(self.original_fps / sample_fps), 1)
         self.frame_count = 0
+
+        # Total frames the sampler will yield at the given sample_fps
+        # Used by Phase 5 processor for progress tracking
+        total_raw = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.total_frames = max(1, total_raw // self.frame_interval)
 
     def __iter__(self):
         return self
@@ -39,9 +39,7 @@ class FrameSampler:
             self.frame_count += 1
 
             if self.frame_count % self.frame_interval == 0:
-                timestamp_sec = (
-                    self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-                )
+                timestamp_sec = self.cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
                 return frame, float(timestamp_sec)
 
     def _release(self):
@@ -49,5 +47,4 @@ class FrameSampler:
             self.cap.release()
 
     def __del__(self):
-        """Ensure the video capture is always released, even on exceptions."""
         self._release()

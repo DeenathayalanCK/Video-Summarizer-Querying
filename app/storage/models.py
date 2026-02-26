@@ -1,14 +1,8 @@
 import uuid
 from datetime import datetime
 from sqlalchemy import (
-    Column,
-    String,
-    Integer,
-    Float,
-    DateTime,
-    Index,
-    Text,
-    ForeignKey,
+    Column, String, Integer, Float,
+    DateTime, Index, Text, ForeignKey,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import declarative_base, relationship
@@ -31,11 +25,7 @@ class Event(Base):
     event_timestamp = Column(DateTime(timezone=True), nullable=False)
     event_metadata = Column("metadata", JSONB, nullable=True)
     schema_version = Column(Integer, nullable=False, default=1)
-    created_at = Column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Caption(Base):
@@ -65,9 +55,7 @@ class CaptionEmbedding(Base):
     caption_id = Column(
         UUID(as_uuid=True),
         ForeignKey("captions.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
-        index=True,
+        nullable=False, unique=True, index=True,
     )
     embedding = Column(Vector(768), nullable=False)
     model_name = Column(String, nullable=False)
@@ -77,25 +65,59 @@ class CaptionEmbedding(Base):
 
 
 class VideoSummary(Base):
-    """
-    Stores the generated summary for a processed video.
-    One row per video_filename + camera_id combination.
-    Regenerated if captions change (tracked via caption_count).
-    """
     __tablename__ = "video_summaries"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     video_filename = Column(String, nullable=False, index=True)
     camera_id = Column(String, nullable=False)
     summary_text = Column(Text, nullable=False)
-    caption_count = Column(Integer, nullable=False)   # how many captions were used
-    duration_seconds = Column(Float, nullable=False)  # last caption timestamp
-    model_name = Column(String, nullable=False)        # which text model generated it
+    caption_count = Column(Integer, nullable=False)
+    duration_seconds = Column(Float, nullable=False)
+    model_name = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-# Indexes
+class ProcessingStatus(Base):
+    """
+    Tracks per-video processing state.
+    Single source of truth for:
+      - Duplicate prevention (skip completed videos on restart)
+      - Progress reporting (% complete, current second)
+      - Graceful shutdown recovery (mark running->failed on SIGTERM)
+      - Status API (GET /api/v1/status)
+
+    State machine:
+      pending -> running -> completed
+                         -> failed     (error mid-way, resumable)
+      pending -> skipped               (already completed in prior run)
+    """
+    __tablename__ = "processing_status"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    video_filename = Column(String, nullable=False, unique=True, index=True)
+    camera_id = Column(String, nullable=False)
+
+    status = Column(String(20), nullable=False, default="pending")
+
+    # Progress
+    total_frames_sampled = Column(Integer, nullable=True)
+    scenes_detected = Column(Integer, nullable=False, default=0)
+    scenes_captioned = Column(Integer, nullable=False, default=0)
+    current_second = Column(Float, nullable=True)
+
+    # Errors
+    last_error = Column(Text, nullable=True)
+    error_count = Column(Integer, nullable=False, default=0)
+
+    # Timing
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 Index("idx_camera_time", Event.camera_id, Event.event_timestamp)
 Index("idx_caption_video", Caption.video_filename, Caption.frame_second_offset)
 Index("idx_summary_video", VideoSummary.video_filename, VideoSummary.camera_id)
+Index("idx_processing_status_video", ProcessingStatus.video_filename, ProcessingStatus.status)

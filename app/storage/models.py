@@ -105,6 +105,10 @@ class ProcessingStatus(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Phase 6B: track whether attribute extraction has run
+    phase_6b_completed = Column(Boolean, nullable=False, default=False)
+    phase_6b_tracks_attributed = Column(Integer, nullable=True)
+
 
 # ── Phase 6A: Detection + Tracking tables ──────────────────────────────────────
 

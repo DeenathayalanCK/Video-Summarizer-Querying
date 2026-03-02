@@ -274,6 +274,20 @@ class EventRepository:
                 })
         return by_class
 
+    def mark_6b_completed(self, video_filename: str, tracks_attributed: int) -> None:
+        """Mark Phase 6B attribute extraction as done for this video."""
+        row = self.get_status(video_filename)
+        if row:
+            row.phase_6b_completed = True
+            row.phase_6b_tracks_attributed = tracks_attributed
+            row.updated_at = __import__("datetime").datetime.utcnow()
+            self.db.commit()
+
+    def has_6b_completed(self, video_filename: str) -> bool:
+        """Check if Phase 6B attribute extraction has already run for this video."""
+        row = self.get_status(video_filename)
+        return row is not None and bool(row.phase_6b_completed)
+
     def has_detection_data(self, video_filename: str) -> bool:
         """Check if Phase 6A detection data exists for this video."""
         return (

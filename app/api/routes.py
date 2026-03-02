@@ -198,6 +198,10 @@ def list_videos(db: Session = Depends(get_db)):
         s.video_filename: s.status
         for s in db.query(ProcessingStatus).all()
     }
+    phase_6b = {
+        s.video_filename: bool(s.phase_6b_completed)
+        for s in db.query(ProcessingStatus).all()
+    }
 
     # Union of all known video filenames
     all_videos = set(det_counts) | set(caption_counts) | set(statuses)
@@ -212,6 +216,7 @@ def list_videos(db: Session = Depends(get_db)):
                 "has_summary": vf in summaries,
                 "processing_status": statuses.get(vf, "unknown"),
                 "pipeline": "detection" if vf in det_counts else "caption" if vf in caption_counts else "unknown",
+                "phase_6b_completed": phase_6b.get(vf, False),
             }
             for vf in sorted(all_videos)
         ]
@@ -322,6 +327,7 @@ def get_tracks(
                 "best_frame_second": e.best_frame_second,
                 "best_crop_path": e.best_crop_path,
                 "best_confidence": round(e.best_confidence or 0, 3),
+                "attributes": e.attributes,
             }
             for e in events
         ],
@@ -423,6 +429,8 @@ def _status_to_response(s) -> dict:
         "started_at": s.started_at.isoformat() if s.started_at else None,
         "completed_at": s.completed_at.isoformat() if s.completed_at else None,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+        "phase_6b_completed": bool(s.phase_6b_completed),
+        "phase_6b_tracks_attributed": s.phase_6b_tracks_attributed,
     }
 
 
@@ -468,6 +476,83 @@ def get_crop(path: str = Query(...)):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Crop not found")
     return FileResponse(path, media_type="image/jpeg")
+
+
+@router.post("/extract-attributes/{video_filename}")
+def extract_attributes(
+    video_filename: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Phase 6B: Run attribute extraction on a video's best crops.
+    Calls minicpm-v on the best crop per tracked object.
+    Always re-runs (useful for development / re-processing).
+    """
+    from app.detection.attribute_processor import AttributeProcessor
+    from app.storage.repository import EventRepository
+
+    repo = EventRepository(db)
+    if not repo.has_detection_data(video_filename):
+        raise HTTPException(
+            status_code=404,
+            detail="No detection data found. Run Phase 6A pipeline first.",
+        )
+
+    try:
+        processor = AttributeProcessor(db)
+        attributed = processor.run(video_filename)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "video_filename": video_filename,
+        "tracks_attributed": attributed,
+        "message": f"Attribute extraction complete. {attributed} track(s) processed.",
+    }
+
+
+@router.get("/attributes/{video_filename}")
+def get_track_attributes(
+    video_filename: str,
+    object_class: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Return all track events with their Phase 6B attributes for a video.
+    Only returns entry events (one per track) with attributes populated.
+    """
+    from app.storage.models import TrackEvent
+
+    q = (
+        db.query(TrackEvent)
+        .filter(
+            TrackEvent.video_filename == video_filename,
+            TrackEvent.event_type == "entry",
+            TrackEvent.attributes.isnot(None),
+        )
+    )
+    if object_class:
+        q = q.filter(TrackEvent.object_class == object_class)
+
+    events = q.order_by(TrackEvent.first_seen_second).all()
+
+    return {
+        "video_filename": video_filename,
+        "count": len(events),
+        "tracks": [
+            {
+                "track_id": e.track_id,
+                "object_class": e.object_class,
+                "first_seen": e.first_seen_second,
+                "last_seen": e.last_seen_second,
+                "duration": e.duration_seconds,
+                "best_confidence": round(e.best_confidence or 0, 3),
+                "best_crop_path": e.best_crop_path,
+                "attributes": e.attributes,
+            }
+            for e in events
+        ],
+    }
 
 
 @router.post("/index")

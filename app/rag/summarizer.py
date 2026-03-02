@@ -103,9 +103,31 @@ class VideoSummarizer:
                 return "  None"
             lines = []
             for e in events:
+                # Include Phase 6B attributes if available
+                attr_str = ""
+                if e.attributes:
+                    attrs = e.attributes
+                    cls = attrs.get("object_class", e.object_class)
+                    if cls in ("car", "truck", "bus", "motorcycle", "bicycle"):
+                        color = attrs.get("color", "")
+                        vtype = attrs.get("type", "")
+                        make = attrs.get("make_estimate", "")
+                        parts = [p for p in [color, vtype] if p and p != "unknown"]
+                        if make and make != "unknown":
+                            parts.append(f"({make})")
+                        if parts:
+                            attr_str = f" [{' '.join(parts)}]"
+                    elif cls == "person":
+                        gender = attrs.get("gender_estimate", "")
+                        top = attrs.get("clothing_top", "")
+                        bottom = attrs.get("clothing_bottom", "")
+                        parts = [p for p in [gender, top, bottom] if p and p not in ("unknown", "none")]
+                        if parts:
+                            attr_str = f" [{', '.join(parts)}]"
+
                 lines.append(
-                    f"  [{e.first_seen_second:.1f}s–{e.last_seen_second:.1f}s] "
-                    f"{e.object_class.upper()} track #{e.track_id} "
+                    f"  [{e.first_seen_second:.1f}s-{e.last_seen_second:.1f}s] "
+                    f"{e.object_class.upper()} track #{e.track_id}{attr_str} "
                     f"({e.duration_seconds:.1f}s)"
                 )
             return "\n".join(lines)

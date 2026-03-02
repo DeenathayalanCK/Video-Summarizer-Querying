@@ -12,6 +12,7 @@ from app.detection.crop_utils import (
 )
 from app.detection.event_generator import EventGenerator, TrackState, build_detection_rag_text
 from app.detection.object_indexer import ObjectIndexer
+from app.detection.attribute_processor import AttributeProcessor
 from app.storage.database import SessionLocal
 from app.storage.repository import EventRepository
 from app.rag.summarizer import VideoSummarizer
@@ -115,8 +116,17 @@ class VideoIntelligenceProcessor:
         try:
             # ── Duplicate prevention ──────────────────────────────────────────
             if repo.is_completed(video_file):
-                self.logger.info("video_already_completed_skipping", video=video_file)
-                repo.mark_skipped(video_file, self.settings.camera_id)
+                # Phase 6A done — but run 6B (attributes) if not yet extracted.
+                # has_6b_completed is False on all existing videos (column defaults False).
+                # This lets us extract attributes without re-running YOLO.
+                if not repo.has_6b_completed(video_file) and repo.has_detection_data(video_file):
+                    self.logger.info(
+                        "video_6a_complete_running_6b_attributes", video=video_file,
+                    )
+                    self._run_6b_only(video_file, db, repo)
+                else:
+                    self.logger.info("video_already_completed_skipping", video=video_file)
+                    repo.mark_skipped(video_file, self.settings.camera_id)
                 return
 
             # ── Reset tracker state from any previous video ───────────────────
@@ -264,6 +274,29 @@ class VideoIntelligenceProcessor:
                     count=len(generated_events),
                 )
 
+            # ── Phase 6B: Attribute extraction ───────────────────────────────
+            # Runs after all track events are saved.
+            # Calls minicpm-v on the best crop per unique track_id.
+            # Upgrades rag_text with color/type/clothing attributes and re-embeds.
+            if not self._shutdown_requested and track_states:
+                self.logger.info("attribute_extraction_starting", video=video_file)
+                try:
+                    attr_processor = AttributeProcessor(db)
+                    attributed = attr_processor.run(video_file)
+                    repo.mark_6b_completed(video_file, attributed)
+                    self.logger.info(
+                        "attribute_extraction_complete",
+                        video=video_file,
+                        tracks_attributed=attributed,
+                    )
+                except Exception as e:
+                    # Attribute extraction failure must NOT block summary or completion
+                    self.logger.warning(
+                        "attribute_extraction_failed",
+                        video=video_file,
+                        error=str(e),
+                    )
+
             # ── Generate summary from structured track data ───────────────────
             if not self._shutdown_requested:
                 self.logger.info("generating_video_summary", video=video_file)
@@ -295,6 +328,31 @@ class VideoIntelligenceProcessor:
             db.close()
             self._current_db = None
             self._current_video = None
+
+    def _run_6b_only(self, video_file: str, db, repo) -> None:
+        """
+        Run Phase 6B attribute extraction on a video that already completed Phase 6A.
+        Called when status=completed but phase_6b_completed=False.
+        Does NOT re-run YOLO or re-process frames.
+        """
+        try:
+            attr_processor = AttributeProcessor(db)
+            attributed = attr_processor.run(video_file)
+            repo.mark_6b_completed(video_file, attributed)
+            self.logger.info(
+                "6b_attributes_extracted",
+                video=video_file,
+                tracks_attributed=attributed,
+            )
+            # Regenerate summary with attribute-enriched rag_text
+            try:
+                from app.rag.summarizer import VideoSummarizer
+                VideoSummarizer(db).summarize_from_tracks(video_file, force=True)
+                self.logger.info("summary_regenerated_with_attributes", video=video_file)
+            except Exception as e:
+                self.logger.warning("summary_regen_failed", video=video_file, error=str(e))
+        except Exception as e:
+            self.logger.error("6b_only_run_failed", video=video_file, error=str(e))
 
     def _update_track_state(
         self,

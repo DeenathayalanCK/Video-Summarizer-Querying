@@ -152,6 +152,13 @@
             Summary
           </button>
           <button
+            onclick="showTab('detections')"
+            id="tab-detections"
+            class="px-4 py-3 text-sm font-medium text-gray-500 hover:text-white transition"
+          >
+            Detections
+          </button>
+          <button
             onclick="showTab('ingest')"
             id="tab-ingest"
             class="px-4 py-3 text-sm font-medium text-gray-500 hover:text-white transition"
@@ -281,9 +288,77 @@
             </div>
           </div>
 
+          <!-- DETECTIONS TAB -->
+          <div id="panel-detections" class="p-6 hidden">
+            <div class="max-w-4xl mx-auto">
+              <div class="flex gap-3 mb-4">
+                <select
+                  id="detections-video-select"
+                  class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-3 text-sm focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="">Select a video...</option>
+                </select>
+                <select
+                  id="detections-mode"
+                  class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-3 text-sm focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="tracks">Tracks (best crops)</option>
+                  <option value="detections">All detections</option>
+                  <option value="events">Track events</option>
+                </select>
+                <select
+                  id="detections-class-filter"
+                  class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-3 text-sm focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="">All classes</option>
+                  <option value="person">Person</option>
+                  <option value="car">Car</option>
+                  <option value="truck">Truck</option>
+                  <option value="bus">Bus</option>
+                  <option value="motorcycle">Motorcycle</option>
+                  <option value="bicycle">Bicycle</option>
+                </select>
+                <button
+                  onclick="doDetections()"
+                  class="bg-indigo-600 hover:bg-indigo-500 px-5 py-3 rounded-lg text-sm font-medium transition"
+                >
+                  Load
+                </button>
+              </div>
+              <div id="detections-results"></div>
+            </div>
+          </div>
+
           <!-- INGEST TAB -->
           <div id="panel-ingest" class="p-6 hidden">
             <div class="max-w-2xl mx-auto space-y-4">
+              <div class="glass rounded-xl p-5">
+                <h3 class="text-sm font-semibold mb-1">
+                  Phase 6B: Extract Object Attributes
+                </h3>
+                <p class="text-xs text-gray-400 mb-4">
+                  Run minicpm-v on the best crop per tracked object to extract
+                  color, type, clothing, and other attributes. Upgrades RAG text
+                  for richer search queries like "red van" or "person in dark
+                  jacket".
+                </p>
+                <div class="flex gap-3 mb-3">
+                  <select
+                    id="attr-video-select"
+                    class="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="">Select a video...</option>
+                  </select>
+                  <button
+                    onclick="doExtractAttributes()"
+                    class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2"
+                  >
+                    <i data-lucide="sparkles" class="w-4 h-4"></i> Extract
+                    Attributes
+                  </button>
+                </div>
+                <div id="attr-result" class="mt-3 text-sm text-gray-400"></div>
+              </div>
               <div class="glass rounded-xl p-5">
                 <h3 class="text-sm font-semibold mb-1">Re-index Captions</h3>
                 <p class="text-xs text-gray-400 mb-4">
@@ -342,6 +417,7 @@
       // ── Utilities ──────────────────────────────────────────────────────────────────
 
       function fmt(s) {
+        if (s == null || isNaN(s)) return "0:00";
         return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
       }
 
@@ -372,7 +448,14 @@
       // ── Tabs ───────────────────────────────────────────────────────────────────────
 
       function showTab(name) {
-        ["search", "ask", "timeline", "summary", "ingest"].forEach((t) => {
+        [
+          "search",
+          "ask",
+          "timeline",
+          "summary",
+          "detections",
+          "ingest",
+        ].forEach((t) => {
           document.getElementById(`panel-${t}`).classList.add("hidden");
           const tab = document.getElementById(`tab-${t}`);
           tab.classList.remove("tab-active");
@@ -427,8 +510,14 @@
         <span class="text-xs font-medium truncate">${v.video_filename}</span>
       </div>
       <div class="flex gap-2 mt-1 ml-5">
-        <span class="text-xs text-gray-600">${v.caption_count} scenes</span>
+        ${
+          v.detection_count > 0
+            ? `<span class="text-xs text-indigo-500">${v.detection_count} detections</span>`
+            : `<span class="text-xs text-gray-600">${v.caption_count} scenes</span>`
+        }
         ${v.has_summary ? '<span class="text-xs text-green-600">✓ summary</span>' : ""}
+        <span class="text-xs text-gray-700">${v.processing_status}</span>
+        ${v.phase_6b_completed ? '<span class="text-xs text-yellow-500">✓ attrs</span>' : ""}
       </div>
     </button>
   `,
@@ -443,6 +532,8 @@
           "ask-video-filter",
           "timeline-video-select",
           "summary-video-select",
+          "detections-video-select",
+          "attr-video-select",
         ].forEach((id) => {
           const el = document.getElementById(id);
           const isSelect = id.includes("select");
@@ -464,6 +555,7 @@
           "ask-video-filter",
           "timeline-video-select",
           "summary-video-select",
+          "detections-video-select",
         ].forEach((id) => {
           document.getElementById(id).value = filename;
         });
@@ -481,25 +573,92 @@
         el.innerHTML = spinner();
 
         try {
+          // Determine if selected video uses detection pipeline
+          const selectedVideo = allVideos.find(
+            (v) => v.video_filename === video,
+          );
+          const useObjectSearch =
+            selectedVideo && selectedVideo.pipeline === "detection";
+
+          let captionData = null,
+            objectData = null;
+
+          // Always run caption search
           const params = new URLSearchParams({ q, top_k: 12 });
           if (video) params.set("video_filename", video);
-          const data = await apiFetch(`/search?${params}`);
+          captionData = await apiFetch(`/search?${params}`).catch(() => ({
+            results: [],
+          }));
 
-          if (!data.results.length) {
+          // Also run object search if detection data available
+          const objParams = new URLSearchParams({ q, top_k: 8 });
+          if (video) objParams.set("video_filename", video);
+          objectData = await apiFetch(`/search/objects?${objParams}`).catch(
+            () => ({ results: [] }),
+          );
+
+          const captionResults = captionData.results || [];
+          const objectResults = objectData.results || [];
+
+          if (!captionResults.length && !objectResults.length) {
             el.innerHTML = `<div class="text-sm text-gray-500 text-center py-8">No results found for "${q}"</div>`;
             return;
           }
 
-          el.innerHTML = `
-      <p class="text-xs text-gray-500 mb-4">${data.count} results for <span class="text-white">"${q}"</span></p>
-      <div class="grid gap-3">
-        ${data.results.map((r) => resultCard(r)).join("")}
-      </div>
-    `;
+          let html = "";
+          if (objectResults.length) {
+            html += `<p class="text-xs text-gray-500 mb-2">${objectResults.length} object detections:</p>
+            <div class="grid gap-3 mb-6">
+              ${objectResults.map((r) => objectResultCard(r)).join("")}
+            </div>`;
+          }
+          if (captionResults.length) {
+            html += `<p class="text-xs text-gray-500 mb-2">${captionResults.length} scene captions:</p>
+            <div class="grid gap-3">
+              ${captionResults.map((r) => resultCard(r)).join("")}
+            </div>`;
+          }
+
+          el.innerHTML = html;
           lucide.createIcons();
         } catch (e) {
           el.innerHTML = errorBox(e.message);
         }
+      }
+
+      function objectResultCard(r) {
+        const score = Math.round((r.score || 0) * 100);
+        const scoreColor =
+          score > 80
+            ? "text-green-400"
+            : score > 60
+              ? "text-yellow-400"
+              : "text-gray-500";
+        return `
+          <div class="result-card glass rounded-xl p-4 fade-in">
+            <div class="flex items-start gap-4">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                  <i data-lucide="eye" class="w-3 h-3 text-yellow-400 shrink-0"></i>
+                  <span class="text-xs text-yellow-300 font-medium">${r.object_class || "object"}</span>
+                  <span class="text-xs text-gray-600">@</span>
+                  <span class="text-xs text-gray-400">${fmt(r.second || r.frame_second_offset)}</span>
+                  <span class="text-xs text-gray-600">${r.video_filename}</span>
+                  <span class="text-xs ${scoreColor} ml-auto">${score}% match</span>
+                </div>
+                <p class="text-xs text-gray-400">${r.description || r.event_text || ""}</p>
+              </div>
+              ${
+                r.crop_path
+                  ? `
+                <img src="/api/v1/crop?path=${encodeURIComponent(r.crop_path)}"
+                  class="w-20 h-16 object-cover rounded-lg shrink-0 bg-gray-800"
+                  onerror="this.style.display='none'" />
+              `
+                  : ""
+              }
+            </div>
+          </div>`;
       }
 
       function resultCard(r) {
@@ -698,7 +857,201 @@
         }
       }
 
+      // ── Attribute rendering helper ──────────────────────────────────────────────
+
+      function renderAttributes(attrs) {
+        if (!attrs) return "";
+        const cls = attrs.object_class || "";
+        const parts = [];
+
+        if (cls === "person") {
+          if (attrs.gender_estimate && attrs.gender_estimate !== "unknown")
+            parts.push(attrs.gender_estimate);
+          if (attrs.clothing_top && attrs.clothing_top !== "unknown")
+            parts.push(attrs.clothing_top);
+          if (attrs.clothing_bottom && attrs.clothing_bottom !== "unknown")
+            parts.push(attrs.clothing_bottom);
+          if (
+            attrs.head_covering &&
+            attrs.head_covering !== "unknown" &&
+            attrs.head_covering !== "none"
+          )
+            parts.push(attrs.head_covering);
+          if (
+            attrs.carrying &&
+            attrs.carrying !== "unknown" &&
+            attrs.carrying !== "none"
+          )
+            parts.push(`carrying: ${attrs.carrying}`);
+        } else {
+          if (attrs.color && attrs.color !== "unknown") parts.push(attrs.color);
+          if (attrs.type && attrs.type !== "unknown") parts.push(attrs.type);
+          if (attrs.make_estimate && attrs.make_estimate !== "unknown")
+            parts.push(attrs.make_estimate);
+          if (attrs.plate_visible) parts.push("plate visible");
+        }
+
+        if (!parts.length) return "";
+        return `<div class="text-xs text-yellow-400 mt-1 truncate" title="${parts.join(", ")}">${parts.join(" · ")}</div>`;
+      }
+
+      // ── Detections ─────────────────────────────────────────────────────────────────
+
+      async function doDetections() {
+        const video = document.getElementById("detections-video-select").value;
+        if (!video) return;
+        const mode = document.getElementById("detections-mode").value;
+        const cls = document.getElementById("detections-class-filter").value;
+        const el = document.getElementById("detections-results");
+        el.innerHTML = spinner();
+
+        try {
+          let data;
+          if (mode === "tracks") {
+            const params = new URLSearchParams();
+            if (cls) params.set("object_class", cls);
+            data = await apiFetch(
+              `/tracks/${encodeURIComponent(video)}?${params}`,
+            );
+            if (!data.track_events.length) {
+              el.innerHTML = `<div class="text-sm text-gray-500 text-center py-8">No tracks found. Run the detection pipeline first.</div>`;
+              return;
+            }
+            el.innerHTML = `
+              <p class="text-xs text-gray-500 mb-4">${data.count} tracks in <span class="text-white">${video}</span></p>
+              <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                ${data.track_events
+                  .map(
+                    (t) => `
+                  <div class="glass rounded-xl p-3 fade-in">
+                    ${
+                      t.best_crop_path
+                        ? `
+                      <img src="/api/v1/crop?path=${encodeURIComponent(t.best_crop_path)}"
+                        class="w-full h-28 object-cover rounded-lg bg-gray-800 mb-2"
+                        onerror="this.style.display='none'" />
+                    `
+                        : `<div class="w-full h-28 bg-gray-800 rounded-lg mb-2 flex items-center justify-center text-gray-600 text-xs">no crop</div>`
+                    }
+                    <div class="text-xs font-medium text-indigo-300">${t.object_class}</div>
+                    <div class="text-xs text-gray-500">Track #${t.track_id} · ${t.event_type}</div>
+                    <div class="text-xs text-gray-600">${fmt(t.first_seen)} → ${fmt(t.last_seen)}</div>
+                    <div class="text-xs text-gray-600">conf: ${(t.best_confidence * 100).toFixed(0)}%</div>
+                    ${t.attributes ? renderAttributes(t.attributes) : ""}
+                  </div>
+                `,
+                  )
+                  .join("")}
+              </div>
+            `;
+          } else if (mode === "detections") {
+            const params = new URLSearchParams();
+            if (cls) params.set("object_class", cls);
+            data = await apiFetch(
+              `/detections/${encodeURIComponent(video)}?${params}`,
+            );
+            if (!data.detections.length) {
+              el.innerHTML = `<div class="text-sm text-gray-500 text-center py-8">No detections found.</div>`;
+              return;
+            }
+            el.innerHTML = `
+              <p class="text-xs text-gray-500 mb-4">${data.count} detections in <span class="text-white">${video}</span></p>
+              <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                ${data.detections
+                  .map(
+                    (d) => `
+                  <div class="glass rounded-xl p-3 fade-in">
+                    ${
+                      d.crop_path
+                        ? `
+                      <img src="/api/v1/crop?path=${encodeURIComponent(d.crop_path)}"
+                        class="w-full h-24 object-cover rounded-lg bg-gray-800 mb-2"
+                        onerror="this.style.display='none'" />
+                    `
+                        : `<div class="w-full h-24 bg-gray-800 rounded-lg mb-2 flex items-center justify-center text-gray-600 text-xs">no crop</div>`
+                    }
+                    <div class="text-xs font-medium text-indigo-300">${d.object_class}</div>
+                    <div class="text-xs text-gray-500">@ ${fmt(d.second)} · ${d.quadrant}</div>
+                    <div class="text-xs text-gray-600">conf: ${(d.confidence * 100).toFixed(0)}% · track #${d.track_id ?? "?"}</div>
+                  </div>
+                `,
+                  )
+                  .join("")}
+              </div>
+            `;
+          } else {
+            // events
+            const params = new URLSearchParams();
+            if (cls) params.set("object_class", cls);
+            data = await apiFetch(
+              `/tracks/${encodeURIComponent(video)}?${params}`,
+            );
+            el.innerHTML = `
+              <p class="text-xs text-gray-500 mb-4">${data.count} track events in <span class="text-white">${video}</span></p>
+              <div class="space-y-2">
+                ${data.track_events
+                  .map(
+                    (e) => `
+                  <div class="glass rounded-xl p-3 flex items-center gap-4 fade-in">
+                    ${
+                      e.best_crop_path
+                        ? `
+                      <img src="/api/v1/crop?path=${encodeURIComponent(e.best_crop_path)}"
+                        class="w-16 h-12 object-cover rounded-lg bg-gray-800 shrink-0"
+                        onerror="this.style.display='none'" />
+                    `
+                        : ""
+                    }
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs font-medium text-indigo-300">${e.object_class}</span>
+                        <span class="text-xs px-1.5 py-0.5 rounded ${
+                          e.event_type === "entry"
+                            ? "bg-green-900 text-green-400"
+                            : e.event_type === "exit"
+                              ? "bg-red-900 text-red-400"
+                              : "bg-yellow-900 text-yellow-400"
+                        }">${e.event_type}</span>
+                        <span class="text-xs text-gray-600">Track #${e.track_id}</span>
+                      </div>
+                      <div class="text-xs text-gray-500 mt-0.5">${fmt(e.first_seen)} → ${fmt(e.last_seen)} · ${e.duration?.toFixed(1) ?? "?"}s</div>
+                    </div>
+                    <div class="text-xs text-gray-600">${(e.best_confidence * 100).toFixed(0)}%</div>
+                    ${e.attributes ? renderAttributes(e.attributes) : ""}
+                  </div>
+                `,
+                  )
+                  .join("")}
+              </div>
+            `;
+          }
+          lucide.createIcons();
+        } catch (e) {
+          el.innerHTML = errorBox(e.message);
+        }
+      }
+
       // ── Ingest actions ─────────────────────────────────────────────────────────────
+
+      async function doExtractAttributes() {
+        const video = document.getElementById("attr-video-select").value;
+        if (!video) return;
+        const el = document.getElementById("attr-result");
+        el.textContent =
+          "Running minicpm-v on crops... this may take a while (~30s per tracked object).";
+        el.className = "mt-3 text-sm text-yellow-400";
+        try {
+          const data = await apiFetch(
+            `/extract-attributes/${encodeURIComponent(video)}`,
+            { method: "POST" },
+          );
+          el.textContent = `✓ ${data.message}`;
+          el.className = "mt-3 text-sm text-green-400";
+        } catch (e) {
+          el.textContent = `Error: ${e.message}`;
+          el.className = "mt-3 text-sm text-red-400";
+        }
+      }
 
       async function doReindex() {
         const el = document.getElementById("reindex-result");

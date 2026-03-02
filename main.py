@@ -112,9 +112,8 @@ def main():
     # but pulling now avoids a long wait when Phase 6B is enabled).
     pull_model(logger, settings.embed_model)
     pull_model(logger, settings.text_model)
-    # Note: multimodal_model pull is skipped in Phase 6A to save startup time.
-    # Uncomment when Phase 6B is enabled:
-    # pull_model(logger, settings.multimodal_model)
+    # Phase 6B: pull multimodal model for crop attribute extraction (minicpm-v)
+    pull_model(logger, settings.multimodal_model)
 
     recover_stale_jobs(logger)
 

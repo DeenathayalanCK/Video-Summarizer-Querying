@@ -6,7 +6,7 @@ from sqlalchemy.exc import OperationalError
 from app.core.logging import setup_logging, get_logger
 from app.core.config import get_settings
 from app.storage.database import engine, init_db
-from app.vision.semantic_video_processor import SemanticVideoProcessor
+from app.vision.video_intelligence_processor import VideoIntelligenceProcessor
 
 MAX_RETRIES = 10
 RETRY_DELAY = 3
@@ -64,9 +64,8 @@ def pull_model(logger, model_name: str):
 
 def recover_stale_jobs(logger):
     """
-    On startup, any video stuck in 'running' state from a previous crashed
-    run is marked 'failed' so it gets reprocessed this run.
-    Without this, a crashed pipeline would permanently skip those videos.
+    Mark any videos stuck in 'running' state (from a previous crash) as failed
+    so they get reprocessed this run.
     """
     from app.storage.database import SessionLocal
     from app.storage.models import ProcessingStatus
@@ -96,7 +95,7 @@ def main():
     logger = get_logger()
     settings = get_settings()
 
-    logger.info("starting_application")
+    logger.info("starting_application", pipeline="phase_6a_detection")
 
     wait_for_db(logger)
     logger.info("database_connection_successful")
@@ -107,18 +106,22 @@ def main():
 
     wait_for_ollama(logger)
 
-    # Pull all required models (idempotent)
-    pull_model(logger, settings.multimodal_model)
+    # Phase 6A only needs embed + text models at startup.
+    # YOLO runs locally (no Ollama) — it auto-downloads on first warmup call.
+    # multimodal_model is pulled for Phase 6B attribute extraction (not used yet,
+    # but pulling now avoids a long wait when Phase 6B is enabled).
     pull_model(logger, settings.embed_model)
     pull_model(logger, settings.text_model)
+    # Note: multimodal_model pull is skipped in Phase 6A to save startup time.
+    # Uncomment when Phase 6B is enabled:
+    # pull_model(logger, settings.multimodal_model)
 
-    # Recover any videos stuck in 'running' from a previous crash
     recover_stale_jobs(logger)
 
-    logger.info("semantic_pipeline_initializing")
-    processor = SemanticVideoProcessor()
+    logger.info("video_intelligence_pipeline_initializing")
+    processor = VideoIntelligenceProcessor()
     processor.run()
-    logger.info("semantic_pipeline_completed")
+    logger.info("video_intelligence_pipeline_completed")
 
 
 if __name__ == "__main__":

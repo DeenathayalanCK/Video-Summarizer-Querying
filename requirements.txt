@@ -1,3 +1,5 @@
+numpy==1.26.4
+
 python-dotenv==1.0.1
 pydantic==2.6.1
 pydantic-settings==2.2.1
@@ -7,8 +9,17 @@ pgvector==0.2.5
 pyyaml==6.0.1
 structlog==24.1.0
 opencv-python==4.9.0.80
-numpy==1.26.4
 requests==2.31.0
 fastapi==0.110.0
 uvicorn==0.29.0
 aiofiles==23.2.1
+
+# ── CPU-only PyTorch ───────────────────────────────────────────────────────────
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+
+# ── Phase 6A: YOLO detection + ByteTrack ──────────────────────────────────────
+ultralytics==8.2.0
+
+lapx>=0.5.2

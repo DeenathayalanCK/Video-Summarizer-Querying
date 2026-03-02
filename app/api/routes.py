@@ -6,9 +6,10 @@ from typing import Optional
 import os
 
 from app.storage.database import SessionLocal
-from app.storage.models import Caption
+from app.storage.models import Caption, DetectedObject, TrackEvent
 from app.rag.qa_engine import QAEngine
 from app.rag.retriever import CaptionRetriever
+from app.rag.object_retriever import ObjectRetriever
 from app.rag.indexer import CaptionIndexer
 from app.rag.summarizer import VideoSummarizer
 from app.storage.repository import EventRepository
@@ -79,7 +80,6 @@ def health():
 
 @router.post("/ask", response_model=AskResponse)
 def ask(body: AskRequest, db: Session = Depends(get_db)):
-    """Ask a natural language question grounded in video captions."""
     engine = QAEngine(db)
     result = engine.ask(
         question=body.question,
@@ -95,7 +95,7 @@ def ask(body: AskRequest, db: Session = Depends(get_db)):
     )
 
 
-# ── Search ─────────────────────────────────────────────────────────────────────
+# ── Legacy caption search ──────────────────────────────────────────────────────
 
 @router.get("/search")
 def search(
@@ -115,51 +115,220 @@ def search(
     return {"query": q, "count": len(results), "results": results}
 
 
-# ── Videos ────────────────────────────────────────────────────────────────────
+# ── Phase 6A: Object detection search ─────────────────────────────────────────
+
+@router.get("/search/objects")
+def search_objects(
+    q: str = Query(..., description="Natural language query, e.g. 'person detected'"),
+    video_filename: Optional[str] = Query(None),
+    camera_id: Optional[str] = Query(None),
+    object_class: Optional[str] = Query(None, description="Filter: person, car, truck, bus, motorcycle, bicycle"),
+    min_second: Optional[float] = Query(None),
+    max_second: Optional[float] = Query(None),
+    top_k: int = Query(8, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    """Search individual frame-level detections semantically."""
+    retriever = ObjectRetriever(db, top_k=top_k)
+    results = retriever.search_detections(
+        query=q,
+        video_filename=video_filename,
+        camera_id=camera_id,
+        object_class=object_class,
+        min_second=min_second,
+        max_second=max_second,
+    )
+    return {"query": q, "count": len(results), "results": results}
+
+
+@router.get("/search/events")
+def search_track_events(
+    q: str = Query(..., description="Natural language query, e.g. 'vehicle entered'"),
+    video_filename: Optional[str] = Query(None),
+    camera_id: Optional[str] = Query(None),
+    event_type: Optional[str] = Query(None, description="Filter: entry, exit, dwell"),
+    object_class: Optional[str] = Query(None),
+    top_k: int = Query(8, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    """Search track lifecycle events (entry/exit/dwell) semantically."""
+    retriever = ObjectRetriever(db, top_k=top_k)
+    results = retriever.search_track_events(
+        query=q,
+        video_filename=video_filename,
+        camera_id=camera_id,
+        event_type=event_type,
+        object_class=object_class,
+    )
+    return {"query": q, "count": len(results), "results": results}
+
+
+# ── Phase 6A: Videos list ─────────────────────────────────────────────────────
 
 @router.get("/videos")
 def list_videos(db: Session = Depends(get_db)):
-    """List all ingested videos with caption counts, summary status, and processing status."""
+    """List all videos with detection stats and processing status."""
     from sqlalchemy import func
     from app.storage.models import VideoSummary, ProcessingStatus
 
-    rows = (
-        db.query(Caption.video_filename, func.count(Caption.id).label("caption_count"))
-        .group_by(Caption.video_filename)
-        .order_by(Caption.video_filename)
+    # Detection counts (Phase 6A data)
+    det_counts = dict(
+        db.query(DetectedObject.video_filename, func.count(DetectedObject.id))
+        .group_by(DetectedObject.video_filename)
         .all()
     )
+
+    # Unique track counts
+    track_counts = dict(
+        db.query(TrackEvent.video_filename, func.count(TrackEvent.id))
+        .filter(TrackEvent.event_type == "entry")
+        .group_by(TrackEvent.video_filename)
+        .all()
+    )
+
+    # Legacy caption counts
+    caption_counts = dict(
+        db.query(Caption.video_filename, func.count(Caption.id))
+        .group_by(Caption.video_filename)
+        .all()
+    )
+
     summaries = {s.video_filename for s in db.query(VideoSummary.video_filename).all()}
     statuses = {
         s.video_filename: s.status
         for s in db.query(ProcessingStatus).all()
     }
 
+    # Union of all known video filenames
+    all_videos = set(det_counts) | set(caption_counts) | set(statuses)
+
     return {
         "videos": [
             {
-                "video_filename": r.video_filename,
-                "caption_count": r.caption_count,
-                "has_summary": r.video_filename in summaries,
-                "processing_status": statuses.get(r.video_filename, "unknown"),
+                "video_filename": vf,
+                "detection_count": det_counts.get(vf, 0),
+                "unique_tracks": track_counts.get(vf, 0),
+                "caption_count": caption_counts.get(vf, 0),
+                "has_summary": vf in summaries,
+                "processing_status": statuses.get(vf, "unknown"),
+                "pipeline": "detection" if vf in det_counts else "caption" if vf in caption_counts else "unknown",
             }
-            for r in rows
+            for vf in sorted(all_videos)
         ]
     }
 
 
-# ── Timeline ──────────────────────────────────────────────────────────────────
+# ── Phase 6A: Track timeline ───────────────────────────────────────────────────
 
 @router.get("/timeline/{video_filename}")
 def get_timeline(video_filename: str, db: Session = Depends(get_db)):
+    """
+    Returns track events for a video in chronological order.
+    Falls back to caption timeline if no detection data exists.
+    """
+    repo = EventRepository(db)
+
+    if repo.has_detection_data(video_filename):
+        retriever = ObjectRetriever(db)
+        timeline = retriever.get_track_timeline(video_filename)
+        if timeline:
+            return {
+                "video_filename": video_filename,
+                "pipeline": "detection",
+                "count": len(timeline),
+                "timeline": timeline,
+            }
+
+    # Fallback to legacy caption timeline
     retriever = CaptionRetriever(db)
     timeline = retriever.get_timeline(video_filename)
     if not timeline:
-        raise HTTPException(status_code=404, detail="Video not found or no captions yet")
-    return {"video_filename": video_filename, "count": len(timeline), "timeline": timeline}
+        raise HTTPException(status_code=404, detail="Video not found or no data yet")
+
+    return {
+        "video_filename": video_filename,
+        "pipeline": "caption",
+        "count": len(timeline),
+        "timeline": timeline,
+    }
 
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+# ── Phase 6A: Detections for a video ──────────────────────────────────────────
+
+@router.get("/detections/{video_filename}")
+def get_detections(
+    video_filename: str,
+    object_class: Optional[str] = Query(None),
+    track_id: Optional[int] = Query(None),
+    min_second: Optional[float] = Query(None),
+    max_second: Optional[float] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Return all detected objects for a video with optional filters."""
+    repo = EventRepository(db)
+    objects = repo.get_detected_objects(
+        video_filename,
+        object_class=object_class,
+        track_id=track_id,
+        min_second=min_second,
+        max_second=max_second,
+    )
+    return {
+        "video_filename": video_filename,
+        "count": len(objects),
+        "detections": [
+            {
+                "id": str(o.id),
+                "second": o.frame_second_offset,
+                "object_class": o.object_class,
+                "confidence": round(o.confidence, 3),
+                "track_id": o.track_id,
+                "quadrant": o.frame_quadrant,
+                "crop_path": o.crop_path,
+                "bbox": {
+                    "x1": o.bbox_x1, "y1": o.bbox_y1,
+                    "x2": o.bbox_x2, "y2": o.bbox_y2,
+                },
+            }
+            for o in objects
+        ],
+    }
+
+
+@router.get("/tracks/{video_filename}")
+def get_tracks(
+    video_filename: str,
+    event_type: Optional[str] = Query(None),
+    object_class: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Return all track events for a video."""
+    repo = EventRepository(db)
+    events = repo.get_track_events(
+        video_filename, event_type=event_type, object_class=object_class,
+    )
+    return {
+        "video_filename": video_filename,
+        "count": len(events),
+        "track_events": [
+            {
+                "id": str(e.id),
+                "track_id": e.track_id,
+                "object_class": e.object_class,
+                "event_type": e.event_type,
+                "first_seen": e.first_seen_second,
+                "last_seen": e.last_seen_second,
+                "duration": e.duration_seconds,
+                "best_frame_second": e.best_frame_second,
+                "best_crop_path": e.best_crop_path,
+                "best_confidence": round(e.best_confidence or 0, 3),
+            }
+            for e in events
+        ],
+    }
+
+
+# ── Summary ────────────────────────────────────────────────────────────────────
 
 @router.get("/summary/{video_filename}", response_model=SummaryResponse)
 def get_summary(video_filename: str, db: Session = Depends(get_db)):
@@ -169,7 +338,7 @@ def get_summary(video_filename: str, db: Session = Depends(get_db)):
     if not summary:
         raise HTTPException(
             status_code=404,
-            detail="No summary found. POST /api/v1/summarize/{video_filename} to generate."
+            detail="No summary found. Process the video first.",
         )
     return SummaryResponse(
         video_filename=summary.video_filename,
@@ -190,8 +359,13 @@ def generate_summary(
     db: Session = Depends(get_db),
 ):
     summarizer = VideoSummarizer(db)
+    repo = EventRepository(db)
     try:
-        summary = summarizer.summarize(video_filename, force=force)
+        # Use track-based summarizer if detection data exists
+        if repo.has_detection_data(video_filename):
+            summary = summarizer.summarize_from_tracks(video_filename, force=force)
+        else:
+            summary = summarizer.summarize(video_filename, force=force)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {
@@ -229,17 +403,13 @@ def list_summaries(db: Session = Depends(get_db)):
     }
 
 
-# ── Processing Status API ─────────────────────────────────────────────────────
+# ── Processing Status ──────────────────────────────────────────────────────────
 
 def _status_to_response(s) -> dict:
-    """Convert a ProcessingStatus row to API response dict with progress %."""
     pct = None
     if s.total_frames_sampled and s.total_frames_sampled > 0 and s.current_second is not None:
-        # Estimate: scenes_captioned / scenes_detected gives caption progress
-        # Use current_second / estimated_duration for frame-level progress
         if s.scenes_detected and s.scenes_detected > 0:
             pct = round((s.scenes_captioned / s.scenes_detected) * 100, 1)
-
     return {
         "video_filename": s.video_filename,
         "status": s.status,
@@ -258,40 +428,22 @@ def _status_to_response(s) -> dict:
 
 @router.get("/status")
 def list_processing_status(db: Session = Depends(get_db)):
-    """
-    Returns processing status for all known videos.
-    Poll this to track pipeline progress in real time.
-    """
     repo = EventRepository(db)
     statuses = repo.list_statuses()
-    return {
-        "count": len(statuses),
-        "statuses": [_status_to_response(s) for s in statuses],
-    }
+    return {"count": len(statuses), "statuses": [_status_to_response(s) for s in statuses]}
 
 
 @router.get("/status/{video_filename}")
 def get_processing_status(video_filename: str, db: Session = Depends(get_db)):
-    """
-    Returns detailed processing status for a single video.
-    Includes progress %, current second, error count, timing.
-    """
     repo = EventRepository(db)
     status = repo.get_status(video_filename)
     if not status:
-        raise HTTPException(
-            status_code=404,
-            detail="No processing record found. Video may not have been queued yet."
-        )
+        raise HTTPException(status_code=404, detail="No processing record found.")
     return _status_to_response(status)
 
 
 @router.delete("/status/{video_filename}")
 def reset_processing_status(video_filename: str, db: Session = Depends(get_db)):
-    """
-    Delete the processing status for a video, allowing it to be reprocessed.
-    Use when a video is stuck in 'failed' or 'running' state.
-    """
     repo = EventRepository(db)
     status = repo.get_status(video_filename)
     if not status:
@@ -301,12 +453,20 @@ def reset_processing_status(video_filename: str, db: Session = Depends(get_db)):
     return {"deleted": video_filename, "message": "Video will be reprocessed on next pipeline run."}
 
 
-# ── Keyframe + Reindex ────────────────────────────────────────────────────────
+# ── Keyframe + Crop serving ───────────────────────────────────────────────────
 
 @router.get("/keyframe")
 def get_keyframe(path: str = Query(...)):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Keyframe not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/crop")
+def get_crop(path: str = Query(...)):
+    """Serve a saved object crop image."""
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Crop not found")
     return FileResponse(path, media_type="image/jpeg")
 
 

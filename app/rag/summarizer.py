@@ -4,15 +4,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.storage.models import Caption, VideoSummary
+from app.storage.models import Caption, VideoSummary, TrackEvent
 from app.prompts.summary_prompt import SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_TEMPLATE
+from app.prompts.track_summary_prompt import TRACK_SUMMARY_SYSTEM_PROMPT, TRACK_SUMMARY_USER_TEMPLATE
 
 
 def _extract_section(text: str, section: str) -> str:
-    """
-    Pull a specific section out of a structured caption.
-    Returns the content after the section header up to the next header.
-    """
     pattern = rf"{section}:\s*(.*?)(?=\n[A-Z ]+:|$)"
     match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
     if match:
@@ -22,20 +19,13 @@ def _extract_section(text: str, section: str) -> str:
 
 def _condense_caption(caption_text: str) -> str:
     """
-    Distill a full structured caption down to the 3 fields that matter
-    for cross-caption temporal reasoning:
-      - SUBJECTS (who/what is present)
-      - SPATIAL LAYOUT (where they are)
-      - ANOMALIES (anything unusual)
-
-    This strips IMAGE QUALITY NOTES and verbose SCENE text that dilute
-    the LLM's attention when comparing across many captions.
+    Distill a full structured caption to core fields for temporal reasoning.
+    Used for the legacy caption-based summarization path.
     """
     subjects = _extract_section(caption_text, "SUBJECTS")
     spatial = _extract_section(caption_text, "SPATIAL LAYOUT")
     anomalies = _extract_section(caption_text, "ANOMALIES")
 
-    # If extraction failed (old-format captions), return truncated original
     if not subjects and not spatial:
         return caption_text[:400]
 
@@ -59,7 +49,138 @@ class VideoSummarizer:
         self.logger = get_logger()
         self.model = self.settings.text_model
 
+    # ── Phase 6A: Summary from structured track events ─────────────────────────
+
+    def summarize_from_tracks(self, video_filename: str, force: bool = False) -> VideoSummary:
+        """
+        Generate a video summary from Phase 6A structured TrackEvent data.
+        This replaces the caption-based summarizer for videos processed by
+        VideoIntelligenceProcessor.
+
+        The summary is grounded in deterministic detection data — no LLM
+        hallucination about what objects were present. The LLM only interprets
+        the confirmed detections.
+        """
+        # Fetch all track events for this video
+        track_events = (
+            self.db.query(TrackEvent)
+            .filter(TrackEvent.video_filename == video_filename)
+            .order_by(TrackEvent.first_seen_second)
+            .all()
+        )
+
+        if not track_events:
+            raise ValueError(
+                f"No track events found for {video_filename}. "
+                "Run VideoIntelligenceProcessor first."
+            )
+
+        camera_id = track_events[0].camera_id
+        duration = max(e.last_seen_second for e in track_events)
+        event_count = len(track_events)
+
+        # Check cache — skip if summary already up to date
+        existing = (
+            self.db.query(VideoSummary)
+            .filter(
+                VideoSummary.video_filename == video_filename,
+                VideoSummary.camera_id == camera_id,
+            )
+            .first()
+        )
+        if existing and existing.caption_count == event_count and not force:
+            self.logger.info("track_summary_cache_hit", video=video_filename)
+            return existing
+
+        # Build structured event block for the LLM
+        # Format: [Xs-Ys] CLASS #N: event_type (duration Ds)
+        entry_events = [e for e in track_events if e.event_type == "entry"]
+        exit_events = [e for e in track_events if e.event_type == "exit"]
+        dwell_events = [e for e in track_events if e.event_type == "dwell"]
+
+        def _fmt_events(events: list) -> str:
+            if not events:
+                return "  None"
+            lines = []
+            for e in events:
+                lines.append(
+                    f"  [{e.first_seen_second:.1f}s–{e.last_seen_second:.1f}s] "
+                    f"{e.object_class.upper()} track #{e.track_id} "
+                    f"({e.duration_seconds:.1f}s)"
+                )
+            return "\n".join(lines)
+
+        # Count unique objects by class
+        unique_tracks = {}
+        for e in entry_events:
+            cls = e.object_class
+            unique_tracks[cls] = unique_tracks.get(cls, 0) + 1
+
+        objects_summary = ", ".join(
+            f"{count} {cls}(s)" for cls, count in unique_tracks.items()
+        ) or "no objects detected"
+
+        event_block = (
+            f"OBJECTS DETECTED: {objects_summary}\n\n"
+            f"ENTRY EVENTS:\n{_fmt_events(entry_events)}\n\n"
+            f"EXIT EVENTS:\n{_fmt_events(exit_events)}\n\n"
+            f"DWELL EVENTS (prolonged presence):\n{_fmt_events(dwell_events)}"
+        )
+
+        user_message = TRACK_SUMMARY_USER_TEMPLATE.format(
+            video_filename=video_filename,
+            camera_id=camera_id,
+            duration=duration,
+            event_count=event_count,
+            events=event_block,
+        )
+
+        payload = {
+            "model": self.model,
+            "system": TRACK_SUMMARY_SYSTEM_PROMPT,
+            "prompt": user_message,
+            "stream": False,
+        }
+
+        response = requests.post(
+            f"{self.settings.ollama_host}/api/generate",
+            json=payload,
+            timeout=600,
+        )
+        response.raise_for_status()
+        summary_text = response.json()["response"]
+
+        # Save or update
+        if existing:
+            existing.summary_text = summary_text
+            existing.caption_count = event_count
+            existing.duration_seconds = duration
+            existing.model_name = self.model
+            existing.updated_at = __import__("datetime").datetime.utcnow()
+            self.db.commit()
+            self.db.refresh(existing)
+            return existing
+        else:
+            summary = VideoSummary(
+                video_filename=video_filename,
+                camera_id=camera_id,
+                summary_text=summary_text,
+                caption_count=event_count,
+                duration_seconds=duration,
+                model_name=self.model,
+            )
+            self.db.add(summary)
+            self.db.commit()
+            self.db.refresh(summary)
+            return summary
+
+    # ── Legacy: Summary from captions (Phase 5 path, kept intact) ─────────────
+
     def summarize(self, video_filename: str, force: bool = False) -> VideoSummary:
+        """
+        Original caption-based summarizer. Used when Phase 5 caption data exists.
+        Phase 6A calls summarize_from_tracks() instead.
+        """
         captions = (
             self.db.query(Caption)
             .filter(Caption.video_filename == video_filename)
@@ -87,10 +208,6 @@ class VideoSummarizer:
             self.logger.info("summary_cache_hit", video=video_filename)
             return existing
 
-        self.logger.info("generating_summary", video=video_filename,
-                         caption_count=caption_count, model=self.model)
-
-        # Build condensed caption block for temporal reasoning
         caption_lines = [
             f"[{c.frame_second_offset:.1f}s] {_condense_caption(c.caption_text)}"
             for c in captions
@@ -118,7 +235,6 @@ class VideoSummarizer:
             timeout=600,
         )
         response.raise_for_status()
-
         summary_text = response.json()["response"]
 
         if existing:
@@ -129,7 +245,7 @@ class VideoSummarizer:
             existing.updated_at = __import__("datetime").datetime.utcnow()
             self.db.commit()
             self.db.refresh(existing)
-            result = existing
+            return existing
         else:
             summary = VideoSummary(
                 video_filename=video_filename,
@@ -142,10 +258,7 @@ class VideoSummarizer:
             self.db.add(summary)
             self.db.commit()
             self.db.refresh(summary)
-            result = summary
-
-        self.logger.info("summary_generated", video=video_filename)
-        return result
+            return summary
 
     def summarize_all(self, force: bool = False) -> list[VideoSummary]:
         videos = (

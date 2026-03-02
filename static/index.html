@@ -601,28 +601,33 @@
         try {
           const data = await apiFetch(`/timeline/${encodeURIComponent(video)}`);
           el.innerHTML = `
-      <p class="text-xs text-gray-500 mb-4">${data.count} scene changes in <span class="text-white">${video}</span></p>
+      <p class="text-xs text-gray-500 mb-4">${data.count} events in <span class="text-white">${video}</span></p>
       <div class="relative">
         <div class="absolute left-6 top-0 bottom-0 w-px bg-gray-800"></div>
         <div class="space-y-4">
           ${data.timeline
-            .map(
-              (item, i) => `
+            .map((item, i) => {
+              // Handle both old caption format and new tracking event format
+              const timestamp = item.second ?? item.first_seen ?? 0;
+              const displayText =
+                item.caption ??
+                `${item.event_type}: ${item.object_class} (Track ${item.track_id})`;
+              return `
             <div class="flex gap-4 fade-in" style="animation-delay:${i * 30}ms">
               <div class="relative z-10 w-12 h-12 shrink-0 flex items-center justify-center">
                 <div class="w-3 h-3 rounded-full bg-indigo-600 border-2 border-gray-950"></div>
               </div>
               <div class="flex-1 glass rounded-xl p-4 mb-0 cursor-pointer result-card" onclick="expandCaption(this)">
                 <div class="flex items-center justify-between mb-2">
-                  <span class="text-xs font-mono text-indigo-300">${fmt(item.second)}</span>
-                  <span class="text-xs text-gray-600">${item.second.toFixed(1)}s</span>
+                  <span class="text-xs font-mono text-indigo-300">${fmt(timestamp)}</span>
+                  <span class="text-xs text-gray-600">${timestamp.toFixed(1)}s</span>
                 </div>
-                <p class="text-xs text-gray-400 line-clamp-2 caption-preview">${item.caption}</p>
-                <p class="text-xs text-gray-300 hidden caption-full">${item.caption}</p>
+                <p class="text-xs text-gray-400 line-clamp-2 caption-preview">${displayText}</p>
+                <p class="text-xs text-gray-300 hidden caption-full">${displayText}</p>
                 ${
-                  item.keyframe_path
+                  item.keyframe_path || item.best_crop_path
                     ? `
-                  <img src="/api/v1/keyframe?path=${encodeURIComponent(item.keyframe_path)}"
+                  <img src="/api/v1/${item.keyframe_path ? "keyframe" : "crop"}?path=${encodeURIComponent(item.keyframe_path || item.best_crop_path)}"
                     class="mt-3 w-full max-w-xs h-32 object-cover rounded-lg bg-gray-800"
                     onerror="this.style.display='none'" />
                 `
@@ -630,8 +635,8 @@
                 }
               </div>
             </div>
-          `,
-            )
+          `;
+            })
             .join("")}
         </div>
       </div>

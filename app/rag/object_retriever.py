@@ -131,6 +131,7 @@ class ObjectRetriever:
                 TrackEvent.best_crop_path,
                 TrackEvent.best_confidence,
                 TrackEvent.rag_text,
+                TrackEvent.attributes,
                 TrackEventEmbedding.embedding.cosine_distance(query_vector).label("distance"),
             )
             .join(TrackEventEmbedding, TrackEventEmbedding.track_event_id == TrackEvent.id)
@@ -163,10 +164,87 @@ class ObjectRetriever:
                 "best_crop_path": row.best_crop_path,
                 "best_confidence": round(row.best_confidence or 0, 3),
                 "rag_text": row.rag_text,
+                "attributes": row.attributes,
                 "score": round(1 - row.distance, 4),
             }
             for row in rows
         ]
+
+    def attribute_keyword_search(
+        self,
+        query: str,
+        video_filename=None,
+        event_type=None,
+        object_class=None,
+        top_k: int = 8,
+    ) -> list[dict]:
+        """
+        Keyword search directly against TrackEvent.attributes JSONB.
+        Complements semantic search — catches color/type/clothing queries
+        that semantic search misses because the query is too short or specific.
+
+        Works by fetching all track events with attributes and doing
+        Python-side substring matching. Fast enough for small datasets.
+        """
+        from app.storage.models import TrackEvent
+
+        q_lower = query.lower()
+        query_words = set(q_lower.split())
+
+        q = (
+            self.db.query(TrackEvent)
+            .filter(TrackEvent.attributes.isnot(None))
+        )
+        if video_filename:
+            q = q.filter(TrackEvent.video_filename == video_filename)
+        if event_type:
+            q = q.filter(TrackEvent.event_type == event_type)
+        if object_class:
+            q = q.filter(TrackEvent.object_class == object_class)
+
+        events = q.all()
+        results = []
+
+        for ev in events:
+            attrs = ev.attributes or {}
+            # Build a flat string of all attribute values for matching
+            attr_values = " ".join(str(v).lower() for v in attrs.values() if v)
+            rag_lower = (ev.rag_text or "").lower()
+            combined = attr_values + " " + rag_lower
+
+            # Score = fraction of query words found in attributes
+            matched = sum(1 for w in query_words if w in combined)
+            if matched == 0:
+                continue
+
+            score = matched / len(query_words)
+            # Boost if match is in attribute values specifically (not just rag_text)
+            attr_matched = sum(1 for w in query_words if w in attr_values)
+            if attr_matched > 0:
+                score = min(1.0, score + 0.3)
+
+            results.append({
+                "event_id": str(ev.id),
+                "video_filename": ev.video_filename,
+                "camera_id": ev.camera_id,
+                "track_id": ev.track_id,
+                "object_class": ev.object_class,
+                "event_type": ev.event_type,
+                "first_seen": ev.first_seen_second,
+                "last_seen": ev.last_seen_second,
+                "duration": ev.duration_seconds,
+                "best_frame_second": ev.best_frame_second,
+                "best_crop_path": ev.best_crop_path,
+                "best_confidence": round(ev.best_confidence or 0, 3),
+                "rag_text": ev.rag_text,
+                "attributes": ev.attributes,
+                "score": round(score, 4),
+                "match_type": "attribute_keyword",
+            })
+
+        # Sort by score descending, deduplicate by event_id
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:top_k]
 
     def get_track_timeline(self, video_filename: str) -> list[dict]:
         """

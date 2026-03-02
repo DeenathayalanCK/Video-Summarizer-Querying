@@ -171,35 +171,185 @@
         <div class="flex-1 overflow-y-auto">
           <!-- SEARCH TAB -->
           <div id="panel-search" class="p-6">
-            <div class="max-w-3xl mx-auto">
-              <div class="flex gap-3 mb-6">
-                <div class="flex-1 relative">
+            <div class="max-w-4xl mx-auto">
+              <!-- Search bar -->
+              <div class="mb-4">
+                <div class="relative">
                   <i
                     data-lucide="search"
-                    class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500"
+                    class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none"
                   ></i>
                   <input
                     id="search-input"
                     type="text"
-                    placeholder="Search across all videos... e.g. 'person in dark jacket'"
-                    class="w-full bg-gray-900 border border-gray-700 rounded-lg pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-indigo-500 transition"
+                    autocomplete="off"
+                    placeholder='Search... try "blue car", "person entered", "van dwell"'
+                    class="w-full bg-gray-950 border border-gray-700 rounded-xl pl-11 pr-4 py-3.5 text-sm focus:outline-none focus:border-indigo-500 transition placeholder-gray-600"
+                    oninput="onSearchInput(this.value)"
                     onkeydown="if (event.key === 'Enter') doSearch();"
                   />
                 </div>
+                <!-- Auto-detected filter chips -->
+                <div
+                  id="filter-chips"
+                  class="flex flex-wrap gap-2 mt-3 min-h-[28px]"
+                ></div>
+                <!-- Suggestion pills -->
+                <div id="search-suggestions" class="flex flex-wrap gap-2 mt-3">
+                  <span class="text-xs text-gray-600 self-center mr-1"
+                    >Try:</span
+                  >
+                  <button
+                    onclick="useQuery('blue car')"
+                    class="text-xs px-3 py-1 rounded-full border border-gray-700 text-gray-400 hover:border-indigo-500 hover:text-indigo-300 transition"
+                  >
+                    blue car
+                  </button>
+                  <button
+                    onclick="useQuery('person with backpack')"
+                    class="text-xs px-3 py-1 rounded-full border border-gray-700 text-gray-400 hover:border-indigo-500 hover:text-indigo-300 transition"
+                  >
+                    person with backpack
+                  </button>
+                  <button
+                    onclick="useQuery('car entered')"
+                    class="text-xs px-3 py-1 rounded-full border border-gray-700 text-gray-400 hover:border-indigo-500 hover:text-indigo-300 transition"
+                  >
+                    car entered
+                  </button>
+                  <button
+                    onclick="useQuery('vehicle dwell')"
+                    class="text-xs px-3 py-1 rounded-full border border-gray-700 text-gray-400 hover:border-indigo-500 hover:text-indigo-300 transition"
+                  >
+                    vehicle dwell
+                  </button>
+                  <button
+                    onclick="useQuery('Toyota sedan')"
+                    class="text-xs px-3 py-1 rounded-full border border-gray-700 text-gray-400 hover:border-indigo-500 hover:text-indigo-300 transition"
+                  >
+                    Toyota sedan
+                  </button>
+                </div>
+              </div>
+
+              <!-- Filter bar: video + type + event + time -->
+              <div class="flex flex-wrap gap-2 mb-5 items-center">
                 <select
                   id="search-video-filter"
-                  class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-3 text-sm focus:outline-none focus:border-indigo-500"
+                  class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-indigo-500 transition"
                 >
                   <option value="">All videos</option>
                 </select>
-                <button
-                  onclick="doSearch()"
-                  class="bg-indigo-600 hover:bg-indigo-500 px-5 py-3 rounded-lg text-sm font-medium transition flex items-center gap-2"
-                >
-                  <span>Search</span>
-                </button>
+
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span class="text-xs text-gray-600">Type:</span>
+                  <button
+                    data-cls=""
+                    onclick="toggleClassFilter(this)"
+                    class="class-pill text-xs px-2.5 py-1 rounded-full border border-indigo-500 text-indigo-300 bg-indigo-500/10 transition"
+                  >
+                    all
+                  </button>
+                  <button
+                    data-cls="person"
+                    onclick="toggleClassFilter(this)"
+                    class="class-pill text-xs px-2.5 py-1 rounded-full border border-gray-700 text-gray-500 hover:border-gray-500 transition"
+                  >
+                    person
+                  </button>
+                  <button
+                    data-cls="car"
+                    onclick="toggleClassFilter(this)"
+                    class="class-pill text-xs px-2.5 py-1 rounded-full border border-gray-700 text-gray-500 hover:border-gray-500 transition"
+                  >
+                    car
+                  </button>
+                  <button
+                    data-cls="truck"
+                    onclick="toggleClassFilter(this)"
+                    class="class-pill text-xs px-2.5 py-1 rounded-full border border-gray-700 text-gray-500 hover:border-gray-500 transition"
+                  >
+                    truck
+                  </button>
+                  <button
+                    data-cls="van"
+                    onclick="toggleClassFilter(this)"
+                    class="class-pill text-xs px-2.5 py-1 rounded-full border border-gray-700 text-gray-500 hover:border-gray-500 transition"
+                  >
+                    van
+                  </button>
+                  <button
+                    data-cls="motorcycle"
+                    onclick="toggleClassFilter(this)"
+                    class="class-pill text-xs px-2.5 py-1 rounded-full border border-gray-700 text-gray-500 hover:border-gray-500 transition"
+                  >
+                    motorcycle
+                  </button>
+                </div>
+
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span class="text-xs text-gray-600">Event:</span>
+                  <button
+                    data-ev=""
+                    onclick="toggleEventFilter(this)"
+                    class="event-pill text-xs px-2.5 py-1 rounded-full border border-indigo-500 text-indigo-300 bg-indigo-500/10 transition"
+                  >
+                    any
+                  </button>
+                  <button
+                    data-ev="entry"
+                    onclick="toggleEventFilter(this)"
+                    class="event-pill text-xs px-2.5 py-1 rounded-full border border-gray-700 text-gray-500 hover:border-gray-500 transition"
+                  >
+                    entry
+                  </button>
+                  <button
+                    data-ev="exit"
+                    onclick="toggleEventFilter(this)"
+                    class="event-pill text-xs px-2.5 py-1 rounded-full border border-gray-700 text-gray-500 hover:border-gray-500 transition"
+                  >
+                    exit
+                  </button>
+                  <button
+                    data-ev="dwell"
+                    onclick="toggleEventFilter(this)"
+                    class="event-pill text-xs px-2.5 py-1 rounded-full border border-gray-700 text-gray-500 hover:border-gray-500 transition"
+                  >
+                    dwell
+                  </button>
+                </div>
+
+                <div class="flex items-center gap-1.5 ml-auto">
+                  <span class="text-xs text-gray-600">From</span>
+                  <input
+                    id="search-min-sec"
+                    type="number"
+                    min="0"
+                    placeholder="0"
+                    step="1"
+                    class="w-16 bg-gray-950 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-indigo-500 transition"
+                  />
+                  <span class="text-xs text-gray-600">to</span>
+                  <input
+                    id="search-max-sec"
+                    type="number"
+                    min="0"
+                    placeholder="∞"
+                    step="1"
+                    class="w-16 bg-gray-950 border border-gray-700 rounded-lg px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-indigo-500 transition"
+                  />
+                  <span class="text-xs text-gray-600">sec</span>
+                  <button
+                    onclick="doSearch()"
+                    class="ml-2 bg-indigo-600 hover:bg-indigo-500 px-4 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5"
+                  >
+                    <i data-lucide="search" class="w-3 h-3"></i> Search
+                  </button>
+                </div>
               </div>
-              <div id="search-results" class="space-y-3"></div>
+
+              <!-- Results -->
+              <div id="search-results"></div>
             </div>
           </div>
 
@@ -423,11 +573,11 @@
 
       function spinner() {
         return `<div class="flex items-center gap-2 text-gray-500 text-sm py-8 justify-center">
-    <svg class="spinner w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-    </svg>
-    Processing...
-  </div>`;
+          <svg class="spinner w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+          </svg>
+          Processing...
+        </div>`;
       }
 
       function errorBox(msg) {
@@ -503,24 +653,24 @@
         el.innerHTML = videos
           .map(
             (v) => `
-    <button onclick="selectVideo('${v.video_filename}')"
-      class="w-full text-left px-3 py-2 rounded-lg hover:bg-gray-800 transition group">
-      <div class="flex items-center gap-2">
-        <i data-lucide="film" class="w-3 h-3 text-indigo-400 shrink-0"></i>
-        <span class="text-xs font-medium truncate">${v.video_filename}</span>
-      </div>
-      <div class="flex gap-2 mt-1 ml-5">
-        ${
-          v.detection_count > 0
-            ? `<span class="text-xs text-indigo-500">${v.detection_count} detections</span>`
-            : `<span class="text-xs text-gray-600">${v.caption_count} scenes</span>`
-        }
-        ${v.has_summary ? '<span class="text-xs text-green-600">✓ summary</span>' : ""}
-        <span class="text-xs text-gray-700">${v.processing_status}</span>
-        ${v.phase_6b_completed ? '<span class="text-xs text-yellow-500">✓ attrs</span>' : ""}
-      </div>
-    </button>
-  `,
+          <button onclick="selectVideo('${v.video_filename}')"
+            class="w-full text-left px-3 py-2 rounded-lg hover:bg-gray-800 transition group">
+            <div class="flex items-center gap-2">
+              <i data-lucide="film" class="w-3 h-3 text-indigo-400 shrink-0"></i>
+              <span class="text-xs font-medium truncate">${v.video_filename}</span>
+            </div>
+            <div class="flex gap-2 mt-1 ml-5">
+              ${
+                v.detection_count > 0
+                  ? `<span class="text-xs text-indigo-500">${v.detection_count} detections</span>`
+                  : `<span class="text-xs text-gray-600">${v.caption_count} scenes</span>`
+              }
+              ${v.has_summary ? '<span class="text-xs text-green-600">✓ summary</span>' : ""}
+              <span class="text-xs text-gray-700">${v.processing_status}</span>
+              ${v.phase_6b_completed ? '<span class="text-xs text-yellow-500">✓ attrs</span>' : ""}
+            </div>
+          </button>
+        `,
           )
           .join("");
         lucide.createIcons();
@@ -565,58 +715,277 @@
 
       // ── Search ─────────────────────────────────────────────────────────────────────
 
+      // ── Smart Search ───────────────────────────────────────────────────────────────
+
+      let activeClass = "";
+      let activeEvent = "";
+
+      const CLASS_KEYWORDS = {
+        person: "person",
+        people: "person",
+        pedestrian: "person",
+        man: "person",
+        woman: "person",
+        male: "person",
+        female: "person",
+        car: "car",
+        sedan: "car",
+        vehicle: "car",
+        automobile: "car",
+        auto: "car",
+        truck: "truck",
+        lorry: "truck",
+        van: "van",
+        bus: "bus",
+        motorcycle: "motorcycle",
+        motorbike: "motorcycle",
+        bike: "motorcycle",
+        bicycle: "bicycle",
+      };
+      const EVENT_KEYWORDS = {
+        enter: "entry",
+        entered: "entry",
+        entry: "entry",
+        arrived: "entry",
+        appears: "entry",
+        appear: "entry",
+        exit: "exit",
+        exited: "exit",
+        left: "exit",
+        departed: "exit",
+        leave: "exit",
+        leaving: "exit",
+        dwell: "dwell",
+        dwell: "dwell",
+        loiter: "dwell",
+        loitering: "dwell",
+        waiting: "dwell",
+        lingering: "dwell",
+        standing: "dwell",
+        stayed: "dwell",
+      };
+      const COLORS = [
+        "red",
+        "blue",
+        "black",
+        "white",
+        "silver",
+        "grey",
+        "gray",
+        "green",
+        "yellow",
+        "orange",
+        "dark",
+        "light",
+        "dark-blue",
+        "navy",
+      ];
+
+      function onSearchInput(val) {
+        document.getElementById("search-suggestions").style.display = val
+          ? "none"
+          : "flex";
+        parseQueryToChips(val);
+      }
+
+      function useQuery(q) {
+        document.getElementById("search-input").value = q;
+        onSearchInput(q);
+        doSearch();
+      }
+
+      function parseQueryToChips(query) {
+        const words = query.toLowerCase().split(/\s+/);
+        const chips = [];
+
+        let detectedClass = "";
+        for (const w of words) {
+          if (CLASS_KEYWORDS[w]) {
+            detectedClass = CLASS_KEYWORDS[w];
+            break;
+          }
+        }
+
+        let detectedEvent = "";
+        for (const w of words) {
+          if (EVENT_KEYWORDS[w]) {
+            detectedEvent = EVENT_KEYWORDS[w];
+            break;
+          }
+        }
+
+        let detectedColor = "";
+        for (const w of words) {
+          if (COLORS.includes(w)) {
+            detectedColor = w;
+            break;
+          }
+        }
+
+        let detectedAfter = null,
+          detectedBefore = null;
+        const afterM = query.match(/(?:after|from)\s+(\d+)(?::(\d+))?/i);
+        const beforeM = query.match(/(?:before|until)\s+(\d+)(?::(\d+))?/i);
+        if (afterM)
+          detectedAfter =
+            parseInt(afterM[1]) * 60 + (afterM[2] ? parseInt(afterM[2]) : 0);
+        if (beforeM)
+          detectedBefore =
+            parseInt(beforeM[1]) * 60 + (beforeM[2] ? parseInt(beforeM[2]) : 0);
+
+        if (detectedClass)
+          chips.push(
+            `<span class="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-indigo-500/15 border border-indigo-500/40 text-indigo-300"><i data-lucide="box" class="w-3 h-3"></i>${detectedClass}</span>`,
+          );
+        if (detectedEvent)
+          chips.push(
+            `<span class="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-300"><i data-lucide="activity" class="w-3 h-3"></i>${detectedEvent}</span>`,
+          );
+        if (detectedColor)
+          chips.push(
+            `<span class="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-yellow-500/15 border border-yellow-500/40 text-yellow-300"><i data-lucide="palette" class="w-3 h-3"></i>${detectedColor}</span>`,
+          );
+        if (detectedAfter !== null)
+          chips.push(
+            `<span class="flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-purple-500/15 border border-purple-500/40 text-purple-300"><i data-lucide="clock" class="w-3 h-3"></i>after ${fmt(detectedAfter)}</span>`,
+          );
+
+        const chipEl = document.getElementById("filter-chips");
+        chipEl.innerHTML = chips.length
+          ? '<span class="text-xs text-gray-600 self-center">Detected:</span>' +
+            chips.join("")
+          : "";
+
+        if (!activeClass && detectedClass) setClassFilter(detectedClass);
+        if (!activeEvent && detectedEvent) setEventFilter(detectedEvent);
+        if (detectedAfter !== null)
+          document.getElementById("search-min-sec").value = detectedAfter;
+        if (detectedBefore !== null)
+          document.getElementById("search-max-sec").value = detectedBefore;
+        if (chips.length) lucide.createIcons();
+      }
+
+      function setClassFilter(cls) {
+        activeClass = cls;
+        document.querySelectorAll(".class-pill").forEach((btn) => {
+          const active = btn.dataset.cls === cls;
+          btn.className =
+            "class-pill text-xs px-2.5 py-1 rounded-full border transition " +
+            (active
+              ? "border-indigo-500 text-indigo-300 bg-indigo-500/10"
+              : "border-gray-700 text-gray-500 hover:border-gray-500");
+        });
+      }
+
+      function setEventFilter(ev) {
+        activeEvent = ev;
+        document.querySelectorAll(".event-pill").forEach((btn) => {
+          const active = btn.dataset.ev === ev;
+          btn.className =
+            "event-pill text-xs px-2.5 py-1 rounded-full border transition " +
+            (active
+              ? "border-indigo-500 text-indigo-300 bg-indigo-500/10"
+              : "border-gray-700 text-gray-500 hover:border-gray-500");
+        });
+      }
+
+      function toggleClassFilter(btn) {
+        setClassFilter(activeClass === btn.dataset.cls ? "" : btn.dataset.cls);
+      }
+
+      function toggleEventFilter(btn) {
+        setEventFilter(activeEvent === btn.dataset.ev ? "" : btn.dataset.ev);
+      }
+
       async function doSearch() {
         const q = document.getElementById("search-input").value.trim();
         if (!q) return;
         const video = document.getElementById("search-video-filter").value;
+        const minSec = document.getElementById("search-min-sec").value;
+        const maxSec = document.getElementById("search-max-sec").value;
         const el = document.getElementById("search-results");
+        document.getElementById("search-suggestions").style.display = "none";
         el.innerHTML = spinner();
 
         try {
-          // Determine if selected video uses detection pipeline
-          const selectedVideo = allVideos.find(
-            (v) => v.video_filename === video,
-          );
-          const useObjectSearch =
-            selectedVideo && selectedVideo.pipeline === "detection";
+          const base = new URLSearchParams({ q, top_k: 10 });
+          if (video) base.set("video_filename", video);
+          if (minSec) base.set("min_second", minSec);
+          if (maxSec) base.set("max_second", maxSec);
 
-          let captionData = null,
-            objectData = null;
+          const evP = new URLSearchParams(base);
+          if (activeClass) evP.set("object_class", activeClass);
+          if (activeEvent) evP.set("event_type", activeEvent);
 
-          // Always run caption search
-          const params = new URLSearchParams({ q, top_k: 12 });
-          if (video) params.set("video_filename", video);
-          captionData = await apiFetch(`/search?${params}`).catch(() => ({
-            results: [],
-          }));
+          const objP = new URLSearchParams(base);
+          if (activeClass) objP.set("object_class", activeClass);
 
-          // Also run object search if detection data available
-          const objParams = new URLSearchParams({ q, top_k: 8 });
-          if (video) objParams.set("video_filename", video);
-          objectData = await apiFetch(`/search/objects?${objParams}`).catch(
-            () => ({ results: [] }),
-          );
+          const [evData, objData, capData] = await Promise.all([
+            apiFetch(`/search/events?${evP}`).catch(() => ({ results: [] })),
+            apiFetch(`/search/objects?${objP}`).catch(() => ({ results: [] })),
+            apiFetch(`/search?${base}`).catch(() => ({ results: [] })),
+          ]);
 
-          const captionResults = captionData.results || [];
-          const objectResults = objectData.results || [];
+          const evResults = evData.results || [];
+          const objResults = objData.results || [];
+          const capResults = capData.results || [];
 
-          if (!captionResults.length && !objectResults.length) {
-            el.innerHTML = `<div class="text-sm text-gray-500 text-center py-8">No results found for "${q}"</div>`;
+          if (!evResults.length && !objResults.length && !capResults.length) {
+            el.innerHTML = `<div class="text-sm text-gray-500 text-center py-12">
+                    <i data-lucide="search-x" class="w-8 h-8 mx-auto mb-3 opacity-30"></i>
+                    <p>No results found for <span class="text-gray-400">"${q}"</span></p>
+                  </div>`;
+            lucide.createIcons();
             return;
           }
 
+          // Separate exact (>=51%) from similar (<51%)
+          const THRESHOLD = 0.51;
+          const exactEv = evResults.filter((r) => r.score >= THRESHOLD);
+          const similarEv = evResults.filter((r) => r.score < THRESHOLD);
+          const exactObj = objResults.filter((r) => r.score >= THRESHOLD);
+          const similarObj = objResults.filter((r) => r.score < THRESHOLD);
+          const exactCap = capResults.filter((r) => r.score >= THRESHOLD);
+          const similarCap = capResults.filter((r) => r.score < THRESHOLD);
+
+          const hasExact = exactEv.length || exactObj.length || exactCap.length;
+          const hasSimilar =
+            similarEv.length || similarObj.length || similarCap.length;
+
           let html = "";
-          if (objectResults.length) {
-            html += `<p class="text-xs text-gray-500 mb-2">${objectResults.length} object detections:</p>
-            <div class="grid gap-3 mb-6">
-              ${objectResults.map((r) => objectResultCard(r)).join("")}
-            </div>`;
+
+          if (hasExact) {
+            html += buildResultSections(exactEv, exactObj, exactCap, false);
           }
-          if (captionResults.length) {
-            html += `<p class="text-xs text-gray-500 mb-2">${captionResults.length} scene captions:</p>
-            <div class="grid gap-3">
-              ${captionResults.map((r) => resultCard(r)).join("")}
-            </div>`;
+
+          if (!hasExact && hasSimilar) {
+            html += `<div class="mb-4 flex items-center gap-3">
+                    <div class="flex-1 h-px bg-gray-800"></div>
+                    <div class="flex items-center gap-2 text-xs text-yellow-500 px-3 py-1.5 rounded-full bg-yellow-500/10 border border-yellow-500/20">
+                      <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
+                      No exact match found for <strong>"${q}"</strong>
+                    </div>
+                    <div class="flex-1 h-px bg-gray-800"></div>
+                  </div>`;
+            html += `<p class="text-xs text-gray-600 mb-3">Similar results:</p>`;
+            html += buildResultSections(
+              similarEv,
+              similarObj,
+              similarCap,
+              true,
+            );
+          } else if (hasExact && hasSimilar) {
+            html += `<div class="mt-5 mb-3 flex items-center gap-2">
+                    <div class="h-px flex-1 bg-gray-800"></div>
+                    <span class="text-xs text-gray-600 px-2">Similar results</span>
+                    <div class="h-px flex-1 bg-gray-800"></div>
+                  </div>`;
+            html += buildResultSections(
+              similarEv,
+              similarObj,
+              similarCap,
+              true,
+            );
           }
 
           el.innerHTML = html;
@@ -626,84 +995,250 @@
         }
       }
 
-      function objectResultCard(r) {
-        const score = Math.round((r.score || 0) * 100);
-        const scoreColor =
-          score > 80
-            ? "text-green-400"
-            : score > 60
-              ? "text-yellow-400"
-              : "text-gray-500";
-        return `
-          <div class="result-card glass rounded-xl p-4 fade-in">
-            <div class="flex items-start gap-4">
-              <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2 mb-1">
-                  <i data-lucide="eye" class="w-3 h-3 text-yellow-400 shrink-0"></i>
-                  <span class="text-xs text-yellow-300 font-medium">${r.object_class || "object"}</span>
-                  <span class="text-xs text-gray-600">@</span>
-                  <span class="text-xs text-gray-400">${fmt(r.second || r.frame_second_offset)}</span>
-                  <span class="text-xs text-gray-600">${r.video_filename}</span>
-                  <span class="text-xs ${scoreColor} ml-auto">${score}% match</span>
-                </div>
-                <p class="text-xs text-gray-400">${r.description || r.event_text || ""}</p>
-              </div>
-              ${
-                r.crop_path
-                  ? `
-                <img src="/api/v1/crop?path=${encodeURIComponent(r.crop_path)}"
-                  class="w-20 h-16 object-cover rounded-lg shrink-0 bg-gray-800"
-                  onerror="this.style.display='none'" />
-              `
-                  : ""
-              }
-            </div>
-          </div>`;
+      function buildResultSections(evResults, objResults, capResults, dimmed) {
+        let html = "";
+        const opacity = dimmed ? "opacity-70" : "";
+
+        if (evResults.length) {
+          html += `<div class="mb-4 ${opacity}">
+                  <div class="flex items-center gap-2 mb-2">
+                    <div class="h-px flex-1 bg-gray-800"></div>
+                    <span class="text-xs text-gray-500 px-2 flex items-center gap-1.5">
+                      <i data-lucide="activity" class="w-3 h-3 text-emerald-500"></i>
+                      ${evResults.length} track event${evResults.length > 1 ? "s" : ""}
+                    </span>
+                    <div class="h-px flex-1 bg-gray-800"></div>
+                  </div>
+                  <div class="space-y-2">${evResults.map(trackEventCard).join("")}</div>
+                </div>`;
+        }
+
+        if (objResults.length) {
+          html += `<div class="mb-4 ${opacity}">
+                  <div class="flex items-center gap-2 mb-2">
+                    <div class="h-px flex-1 bg-gray-800"></div>
+                    <span class="text-xs text-gray-500 px-2 flex items-center gap-1.5">
+                      <i data-lucide="eye" class="w-3 h-3 text-yellow-500"></i>
+                      ${objResults.length} frame detection${objResults.length > 1 ? "s" : ""}
+                    </span>
+                    <div class="h-px flex-1 bg-gray-800"></div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-2">${objResults.map(frameDetectionCard).join("")}</div>
+                </div>`;
+        }
+
+        if (capResults.length) {
+          html += `<div class="mb-4 ${opacity}">
+                  <div class="flex items-center gap-2 mb-2">
+                    <div class="h-px flex-1 bg-gray-800"></div>
+                    <span class="text-xs text-gray-500 px-2 flex items-center gap-1.5">
+                      <i data-lucide="film" class="w-3 h-3 text-indigo-400"></i>
+                      ${capResults.length} scene description${capResults.length > 1 ? "s" : ""}
+                    </span>
+                    <div class="h-px flex-1 bg-gray-800"></div>
+                  </div>
+                  <div class="space-y-2">${capResults.map(captionCard).join("")}</div>
+                </div>`;
+        }
+
+        return html;
       }
 
-      function resultCard(r) {
-        const score = Math.round(r.score * 100);
+      // ── Result cards ───────────────────────────────────────────────────────────
+
+      function trackEventCard(r) {
+        const score = Math.round((r.score || 0) * 100);
         const scoreColor =
-          score > 80
+          score >= 80
             ? "text-green-400"
-            : score > 60
+            : score >= 51
               ? "text-yellow-400"
               : "text-gray-500";
-        return `
-    <div class="result-card glass rounded-xl p-4 cursor-pointer fade-in" onclick="expandCaption(this)">
-      <div class="flex items-start justify-between gap-4">
-        <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-2 mb-2">
-            <i data-lucide="film" class="w-3 h-3 text-indigo-400 shrink-0"></i>
-            <span class="text-xs text-indigo-300 font-medium truncate">${r.video_filename}</span>
-            <span class="text-xs text-gray-600">@</span>
-            <span class="text-xs text-gray-400">${fmt(r.second)}</span>
-            <span class="text-xs ${scoreColor} ml-auto">${score}% match</span>
-          </div>
-          <p class="text-xs text-gray-400 line-clamp-2 caption-preview">${r.caption}</p>
-          <p class="text-xs text-gray-300 hidden caption-full">${r.caption}</p>
-        </div>
-        ${
-          r.keyframe_path
-            ? `
-          <img src="/api/v1/keyframe?path=${encodeURIComponent(r.keyframe_path)}"
-            class="w-24 h-16 object-cover rounded-lg shrink-0 bg-gray-800"
-            onerror="this.style.display='none'" />
-        `
-            : ""
+        const matchBadge =
+          r.match_type === "attribute_keyword"
+            ? '<span class="text-xs px-1.5 py-0.5 rounded bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">attr</span>'
+            : "";
+        const evColors = {
+          entry: "bg-green-500/10 text-green-300 border-green-500/30",
+          exit: "bg-red-500/10 text-red-300 border-red-500/30",
+          dwell: "bg-yellow-500/10 text-yellow-300 border-yellow-500/30",
+        };
+        const evStyle =
+          evColors[r.event_type] ||
+          "bg-gray-500/10 text-gray-300 border-gray-500/30";
+
+        // Build attribute pills
+        let attrHtml = "";
+        if (r.attributes) {
+          const a = r.attributes;
+          const cls = a.object_class || r.object_class || "";
+          const pills = [];
+          if (cls === "person") {
+            if (a.gender_estimate && a.gender_estimate !== "unknown")
+              pills.push(a.gender_estimate);
+            if (a.clothing_top && a.clothing_top !== "unknown")
+              pills.push(a.clothing_top);
+            if (a.clothing_bottom && a.clothing_bottom !== "unknown")
+              pills.push(a.clothing_bottom);
+            if (
+              a.head_covering &&
+              !["unknown", "none"].includes(a.head_covering)
+            )
+              pills.push(a.head_covering);
+            if (a.carrying && !["unknown", "none"].includes(a.carrying))
+              pills.push("carrying: " + a.carrying);
+          } else {
+            if (a.color && a.color !== "unknown") pills.push(a.color);
+            if (a.type && a.type !== "unknown") pills.push(a.type);
+            if (a.make_estimate && a.make_estimate !== "unknown")
+              pills.push(a.make_estimate);
+            if (a.plate_visible) pills.push("plate visible");
+          }
+          if (pills.length) {
+            attrHtml =
+              '<div class="flex gap-1 flex-wrap mt-1.5">' +
+              pills
+                .map(
+                  (p) =>
+                    `<span class="text-xs px-2 py-0.5 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-300">${p}</span>`,
+                )
+                .join("") +
+              "</div>";
+          }
         }
-      </div>
-    </div>
-  `;
+
+        // Build proof section (rag_text shown on expand)
+        const ragText = r.rag_text
+          ? r.rag_text.replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          : "";
+        const proofHtml = ragText
+          ? `
+                <div class="proof-section hidden mt-2 p-2 rounded-lg bg-gray-900 border border-gray-800">
+                  <p class="text-xs text-gray-500 mb-1 font-medium">Search index text (proof):</p>
+                  <p class="text-xs text-gray-400 leading-relaxed">${ragText}</p>
+                </div>`
+          : "";
+
+        return `<div class="glass rounded-xl p-3.5 fade-in cursor-pointer hover:border-gray-600 border border-transparent transition" onclick="toggleProof(this)">
+                <div class="flex items-start gap-3">
+                  ${
+                    r.best_crop_path
+                      ? `<img src="/api/v1/crop?path=${encodeURIComponent(r.best_crop_path)}"
+                    class="w-20 h-16 object-cover rounded-lg shrink-0 bg-gray-800" onerror="this.style.display='none'" />`
+                      : `<div class="w-20 h-16 bg-gray-800 rounded-lg shrink-0 flex items-center justify-center"><i data-lucide="box" class="w-5 h-5 text-gray-700"></i></div>`
+                  }
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap mb-1">
+                      <span class="text-xs font-semibold text-white capitalize">${r.object_class} #${r.track_id}</span>
+                      <span class="text-xs px-2 py-0.5 rounded-full border ${evStyle} font-medium">${r.event_type}</span>
+                      ${matchBadge}
+                      <span class="text-xs text-gray-500 truncate">${r.video_filename}</span>
+                      <span class="text-xs font-semibold ${scoreColor} ml-auto">${score}% match</span>
+                    </div>
+                    <div class="flex items-center gap-3 text-xs text-gray-500">
+                      <span>${fmt(r.first_seen)} → ${fmt(r.last_seen)}</span>
+                      ${r.duration ? `<span>${r.duration.toFixed(1)}s</span>` : ""}
+                      ${r.best_confidence ? `<span>${(r.best_confidence * 100).toFixed(0)}% conf</span>` : ""}
+                      <span class="text-gray-700 text-xs ml-auto">click to expand</span>
+                    </div>
+                    ${attrHtml}
+                    ${proofHtml}
+                  </div>
+                </div>
+              </div>`;
+      }
+
+      function frameDetectionCard(r) {
+        const score = Math.round((r.score || 0) * 100);
+        const scoreColor =
+          score >= 80
+            ? "text-green-400"
+            : score >= 51
+              ? "text-yellow-400"
+              : "text-gray-500";
+        const ragText = (r.description || r.event_text || r.rag_text || "")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+        const proofHtml = ragText
+          ? `
+                <div class="proof-section hidden mt-2 p-2 rounded-lg bg-gray-900 border border-gray-800">
+                  <p class="text-xs text-gray-500 mb-1">Search index text:</p>
+                  <p class="text-xs text-gray-400">${ragText}</p>
+                </div>`
+          : "";
+
+        return `<div class="glass rounded-xl p-3 fade-in cursor-pointer hover:border-gray-600 border border-transparent transition" onclick="toggleProof(this)">
+                <div class="flex items-center gap-3">
+                  ${
+                    r.crop_path
+                      ? `<img src="/api/v1/crop?path=${encodeURIComponent(r.crop_path)}"
+                    class="w-14 h-12 object-cover rounded-lg shrink-0 bg-gray-800" onerror="this.style.display='none'" />`
+                      : ""
+                  }
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-1.5 mb-0.5">
+                      <span class="text-xs font-medium text-yellow-300 capitalize">${r.object_class}</span>
+                      ${r.track_id ? `<span class="text-xs text-gray-600">#${r.track_id}</span>` : ""}
+                      <span class="text-xs font-semibold ${scoreColor} ml-auto">${score}%</span>
+                    </div>
+                    <div class="text-xs text-gray-500">${fmt(r.second || r.frame_second_offset)} · ${r.quadrant || ""}</div>
+                    <div class="text-xs text-gray-600 truncate">${r.video_filename}</div>
+                    ${proofHtml}
+                  </div>
+                </div>
+              </div>`;
+      }
+
+      function captionCard(r) {
+        const score = Math.round(r.score * 100);
+        const scoreColor =
+          score >= 80
+            ? "text-green-400"
+            : score >= 51
+              ? "text-yellow-400"
+              : "text-gray-500";
+        return `<div class="glass rounded-xl p-3.5 fade-in cursor-pointer hover:border-gray-600 border border-transparent transition" onclick="toggleProof(this)">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 mb-1.5">
+                      <i data-lucide="film" class="w-3 h-3 text-indigo-400 shrink-0"></i>
+                      <span class="text-xs text-indigo-300 font-medium truncate">${r.video_filename}</span>
+                      <span class="text-xs text-gray-600">@</span>
+                      <span class="text-xs text-gray-400">${fmt(r.second)}</span>
+                      <span class="text-xs font-semibold ${scoreColor} ml-auto">${score}%</span>
+                    </div>
+                    <p class="text-xs text-gray-400 line-clamp-2 caption-preview">${r.caption}</p>
+                    <p class="text-xs text-gray-300 hidden caption-full">${r.caption}</p>
+                  </div>
+                  ${
+                    r.keyframe_path
+                      ? `<img src="/api/v1/keyframe?path=${encodeURIComponent(r.keyframe_path)}"
+                    class="w-20 h-14 object-cover rounded-lg shrink-0 bg-gray-800" onerror="this.style.display='none'" />`
+                      : ""
+                  }
+                </div>
+              </div>`;
+      }
+
+      // Legacy aliases
+      function objectResultCard(r) {
+        return frameDetectionCard(r);
+      }
+      function resultCard(r) {
+        return captionCard(r);
+      }
+
+      function toggleProof(card) {
+        // Toggle proof section visibility
+        const proof = card.querySelector(".proof-section");
+        if (proof) proof.classList.toggle("hidden");
+        // Also toggle caption expand if present
+        card.querySelector(".caption-preview")?.classList.toggle("hidden");
+        card.querySelector(".caption-full")?.classList.toggle("hidden");
       }
 
       function expandCaption(card) {
-        const preview = card.querySelector(".caption-preview");
-        const full = card.querySelector(".caption-full");
-        if (preview && full) {
-          preview.classList.toggle("hidden");
-          full.classList.toggle("hidden");
-        }
+        toggleProof(card);
       }
 
       // ── Ask ────────────────────────────────────────────────────────────────────────
@@ -725,24 +1260,24 @@
           });
 
           el.innerHTML = `
-      <div class="glass rounded-xl p-5 mb-4 fade-in">
-        <div class="flex items-center gap-2 mb-3">
-          <i data-lucide="sparkles" class="w-4 h-4 text-indigo-400"></i>
-          <span class="text-sm font-medium">Answer</span>
-        </div>
-        <p class="text-sm text-gray-200 leading-relaxed">${data.answer}</p>
-      </div>
-      ${
-        data.sources.length
-          ? `
-        <div class="mb-2 text-xs text-gray-500">Based on ${data.sources.length} source moments:</div>
-        <div class="grid gap-3">
-          ${data.sources.map((r) => resultCard(r)).join("")}
-        </div>
-      `
-          : ""
-      }
-    `;
+            <div class="glass rounded-xl p-5 mb-4 fade-in">
+              <div class="flex items-center gap-2 mb-3">
+                <i data-lucide="sparkles" class="w-4 h-4 text-indigo-400"></i>
+                <span class="text-sm font-medium">Answer</span>
+              </div>
+              <p class="text-sm text-gray-200 leading-relaxed">${data.answer}</p>
+            </div>
+            ${
+              data.sources.length
+                ? `
+              <div class="mb-2 text-xs text-gray-500">Based on ${data.sources.length} source moments:</div>
+              <div class="grid gap-3">
+                ${data.sources.map((r) => resultCard(r)).join("")}
+              </div>
+            `
+                : ""
+            }
+          `;
           lucide.createIcons();
         } catch (e) {
           el.innerHTML = errorBox(e.message);
@@ -760,46 +1295,46 @@
         try {
           const data = await apiFetch(`/timeline/${encodeURIComponent(video)}`);
           el.innerHTML = `
-      <p class="text-xs text-gray-500 mb-4">${data.count} events in <span class="text-white">${video}</span></p>
-      <div class="relative">
-        <div class="absolute left-6 top-0 bottom-0 w-px bg-gray-800"></div>
-        <div class="space-y-4">
-          ${data.timeline
-            .map((item, i) => {
-              // Handle both old caption format and new tracking event format
-              const timestamp = item.second ?? item.first_seen ?? 0;
-              const displayText =
-                item.caption ??
-                `${item.event_type}: ${item.object_class} (Track ${item.track_id})`;
-              return `
-            <div class="flex gap-4 fade-in" style="animation-delay:${i * 30}ms">
-              <div class="relative z-10 w-12 h-12 shrink-0 flex items-center justify-center">
-                <div class="w-3 h-3 rounded-full bg-indigo-600 border-2 border-gray-950"></div>
-              </div>
-              <div class="flex-1 glass rounded-xl p-4 mb-0 cursor-pointer result-card" onclick="expandCaption(this)">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="text-xs font-mono text-indigo-300">${fmt(timestamp)}</span>
-                  <span class="text-xs text-gray-600">${timestamp.toFixed(1)}s</span>
-                </div>
-                <p class="text-xs text-gray-400 line-clamp-2 caption-preview">${displayText}</p>
-                <p class="text-xs text-gray-300 hidden caption-full">${displayText}</p>
-                ${
-                  item.keyframe_path || item.best_crop_path
-                    ? `
-                  <img src="/api/v1/${item.keyframe_path ? "keyframe" : "crop"}?path=${encodeURIComponent(item.keyframe_path || item.best_crop_path)}"
-                    class="mt-3 w-full max-w-xs h-32 object-cover rounded-lg bg-gray-800"
-                    onerror="this.style.display='none'" />
-                `
-                    : ""
-                }
+            <p class="text-xs text-gray-500 mb-4">${data.count} events in <span class="text-white">${video}</span></p>
+            <div class="relative">
+              <div class="absolute left-6 top-0 bottom-0 w-px bg-gray-800"></div>
+              <div class="space-y-4">
+                ${data.timeline
+                  .map((item, i) => {
+                    // Handle both old caption format and new tracking event format
+                    const timestamp = item.second ?? item.first_seen ?? 0;
+                    const displayText =
+                      item.caption ??
+                      `${item.event_type}: ${item.object_class} (Track ${item.track_id})`;
+                    return `
+                  <div class="flex gap-4 fade-in" style="animation-delay:${i * 30}ms">
+                    <div class="relative z-10 w-12 h-12 shrink-0 flex items-center justify-center">
+                      <div class="w-3 h-3 rounded-full bg-indigo-600 border-2 border-gray-950"></div>
+                    </div>
+                    <div class="flex-1 glass rounded-xl p-4 mb-0 cursor-pointer result-card" onclick="expandCaption(this)">
+                      <div class="flex items-center justify-between mb-2">
+                        <span class="text-xs font-mono text-indigo-300">${fmt(timestamp)}</span>
+                        <span class="text-xs text-gray-600">${timestamp.toFixed(1)}s</span>
+                      </div>
+                      <p class="text-xs text-gray-400 line-clamp-2 caption-preview">${displayText}</p>
+                      <p class="text-xs text-gray-300 hidden caption-full">${displayText}</p>
+                      ${
+                        item.keyframe_path || item.best_crop_path
+                          ? `
+                        <img src="/api/v1/${item.keyframe_path ? "keyframe" : "crop"}?path=${encodeURIComponent(item.keyframe_path || item.best_crop_path)}"
+                          class="mt-3 w-full max-w-xs h-32 object-cover rounded-lg bg-gray-800"
+                          onerror="this.style.display='none'" />
+                      `
+                          : ""
+                      }
+                    </div>
+                  </div>
+                `;
+                  })
+                  .join("")}
               </div>
             </div>
           `;
-            })
-            .join("")}
-        </div>
-      </div>
-    `;
         } catch (e) {
           el.innerHTML = errorBox(e.message);
         }
@@ -836,21 +1371,21 @@
           }
 
           el.innerHTML = `
-      <div class="glass rounded-xl p-5 fade-in">
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center gap-2">
-            <i data-lucide="file-text" class="w-4 h-4 text-indigo-400"></i>
-            <span class="text-sm font-medium">${video}</span>
-          </div>
-          <div class="flex gap-3 text-xs text-gray-500">
-            <span>${data.caption_count} scenes</span>
-            <span>${fmt(data.duration_seconds)} duration</span>
-            <span class="text-gray-600">${data.model_name}</span>
-          </div>
-        </div>
-        <pre class="text-xs text-gray-300 leading-relaxed">${data.summary || data.summary_text}</pre>
-      </div>
-    `;
+            <div class="glass rounded-xl p-5 fade-in">
+              <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-2">
+                  <i data-lucide="file-text" class="w-4 h-4 text-indigo-400"></i>
+                  <span class="text-sm font-medium">${video}</span>
+                </div>
+                <div class="flex gap-3 text-xs text-gray-500">
+                  <span>${data.caption_count} scenes</span>
+                  <span>${fmt(data.duration_seconds)} duration</span>
+                  <span class="text-gray-600">${data.model_name}</span>
+                </div>
+              </div>
+              <pre class="text-xs text-gray-300 leading-relaxed">${data.summary || data.summary_text}</pre>
+            </div>
+          `;
           lucide.createIcons();
         } catch (e) {
           el.innerHTML = errorBox(e.message);
@@ -918,32 +1453,32 @@
               return;
             }
             el.innerHTML = `
-              <p class="text-xs text-gray-500 mb-4">${data.count} tracks in <span class="text-white">${video}</span></p>
-              <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                ${data.track_events
-                  .map(
-                    (t) => `
-                  <div class="glass rounded-xl p-3 fade-in">
-                    ${
-                      t.best_crop_path
-                        ? `
-                      <img src="/api/v1/crop?path=${encodeURIComponent(t.best_crop_path)}"
-                        class="w-full h-28 object-cover rounded-lg bg-gray-800 mb-2"
-                        onerror="this.style.display='none'" />
-                    `
-                        : `<div class="w-full h-28 bg-gray-800 rounded-lg mb-2 flex items-center justify-center text-gray-600 text-xs">no crop</div>`
-                    }
-                    <div class="text-xs font-medium text-indigo-300">${t.object_class}</div>
-                    <div class="text-xs text-gray-500">Track #${t.track_id} · ${t.event_type}</div>
-                    <div class="text-xs text-gray-600">${fmt(t.first_seen)} → ${fmt(t.last_seen)}</div>
-                    <div class="text-xs text-gray-600">conf: ${(t.best_confidence * 100).toFixed(0)}%</div>
-                    ${t.attributes ? renderAttributes(t.attributes) : ""}
-                  </div>
-                `,
-                  )
-                  .join("")}
-              </div>
-            `;
+                    <p class="text-xs text-gray-500 mb-4">${data.count} tracks in <span class="text-white">${video}</span></p>
+                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                      ${data.track_events
+                        .map(
+                          (t) => `
+                        <div class="glass rounded-xl p-3 fade-in">
+                          ${
+                            t.best_crop_path
+                              ? `
+                            <img src="/api/v1/crop?path=${encodeURIComponent(t.best_crop_path)}"
+                              class="w-full h-28 object-cover rounded-lg bg-gray-800 mb-2"
+                              onerror="this.style.display='none'" />
+                          `
+                              : `<div class="w-full h-28 bg-gray-800 rounded-lg mb-2 flex items-center justify-center text-gray-600 text-xs">no crop</div>`
+                          }
+                          <div class="text-xs font-medium text-indigo-300">${t.object_class}</div>
+                          <div class="text-xs text-gray-500">Track #${t.track_id} · ${t.event_type}</div>
+                          <div class="text-xs text-gray-600">${fmt(t.first_seen)} → ${fmt(t.last_seen)}</div>
+                          <div class="text-xs text-gray-600">conf: ${(t.best_confidence * 100).toFixed(0)}%</div>
+                          ${t.attributes ? renderAttributes(t.attributes) : ""}
+                        </div>
+                      `,
+                        )
+                        .join("")}
+                    </div>
+                  `;
           } else if (mode === "detections") {
             const params = new URLSearchParams();
             if (cls) params.set("object_class", cls);
@@ -955,30 +1490,30 @@
               return;
             }
             el.innerHTML = `
-              <p class="text-xs text-gray-500 mb-4">${data.count} detections in <span class="text-white">${video}</span></p>
-              <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                ${data.detections
-                  .map(
-                    (d) => `
-                  <div class="glass rounded-xl p-3 fade-in">
-                    ${
-                      d.crop_path
-                        ? `
-                      <img src="/api/v1/crop?path=${encodeURIComponent(d.crop_path)}"
-                        class="w-full h-24 object-cover rounded-lg bg-gray-800 mb-2"
-                        onerror="this.style.display='none'" />
-                    `
-                        : `<div class="w-full h-24 bg-gray-800 rounded-lg mb-2 flex items-center justify-center text-gray-600 text-xs">no crop</div>`
-                    }
-                    <div class="text-xs font-medium text-indigo-300">${d.object_class}</div>
-                    <div class="text-xs text-gray-500">@ ${fmt(d.second)} · ${d.quadrant}</div>
-                    <div class="text-xs text-gray-600">conf: ${(d.confidence * 100).toFixed(0)}% · track #${d.track_id ?? "?"}</div>
-                  </div>
-                `,
-                  )
-                  .join("")}
-              </div>
-            `;
+                    <p class="text-xs text-gray-500 mb-4">${data.count} detections in <span class="text-white">${video}</span></p>
+                    <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                      ${data.detections
+                        .map(
+                          (d) => `
+                        <div class="glass rounded-xl p-3 fade-in">
+                          ${
+                            d.crop_path
+                              ? `
+                            <img src="/api/v1/crop?path=${encodeURIComponent(d.crop_path)}"
+                              class="w-full h-24 object-cover rounded-lg bg-gray-800 mb-2"
+                              onerror="this.style.display='none'" />
+                          `
+                              : `<div class="w-full h-24 bg-gray-800 rounded-lg mb-2 flex items-center justify-center text-gray-600 text-xs">no crop</div>`
+                          }
+                          <div class="text-xs font-medium text-indigo-300">${d.object_class}</div>
+                          <div class="text-xs text-gray-500">@ ${fmt(d.second)} · ${d.quadrant}</div>
+                          <div class="text-xs text-gray-600">conf: ${(d.confidence * 100).toFixed(0)}% · track #${d.track_id ?? "?"}</div>
+                        </div>
+                      `,
+                        )
+                        .join("")}
+                    </div>
+                  `;
           } else {
             // events
             const params = new URLSearchParams();
@@ -987,43 +1522,43 @@
               `/tracks/${encodeURIComponent(video)}?${params}`,
             );
             el.innerHTML = `
-              <p class="text-xs text-gray-500 mb-4">${data.count} track events in <span class="text-white">${video}</span></p>
-              <div class="space-y-2">
-                ${data.track_events
-                  .map(
-                    (e) => `
-                  <div class="glass rounded-xl p-3 flex items-center gap-4 fade-in">
-                    ${
-                      e.best_crop_path
-                        ? `
-                      <img src="/api/v1/crop?path=${encodeURIComponent(e.best_crop_path)}"
-                        class="w-16 h-12 object-cover rounded-lg bg-gray-800 shrink-0"
-                        onerror="this.style.display='none'" />
-                    `
-                        : ""
-                    }
-                    <div class="flex-1 min-w-0">
-                      <div class="flex items-center gap-2">
-                        <span class="text-xs font-medium text-indigo-300">${e.object_class}</span>
-                        <span class="text-xs px-1.5 py-0.5 rounded ${
-                          e.event_type === "entry"
-                            ? "bg-green-900 text-green-400"
-                            : e.event_type === "exit"
-                              ? "bg-red-900 text-red-400"
-                              : "bg-yellow-900 text-yellow-400"
-                        }">${e.event_type}</span>
-                        <span class="text-xs text-gray-600">Track #${e.track_id}</span>
-                      </div>
-                      <div class="text-xs text-gray-500 mt-0.5">${fmt(e.first_seen)} → ${fmt(e.last_seen)} · ${e.duration?.toFixed(1) ?? "?"}s</div>
+                    <p class="text-xs text-gray-500 mb-4">${data.count} track events in <span class="text-white">${video}</span></p>
+                    <div class="space-y-2">
+                      ${data.track_events
+                        .map(
+                          (e) => `
+                        <div class="glass rounded-xl p-3 flex items-center gap-4 fade-in">
+                          ${
+                            e.best_crop_path
+                              ? `
+                            <img src="/api/v1/crop?path=${encodeURIComponent(e.best_crop_path)}"
+                              class="w-16 h-12 object-cover rounded-lg bg-gray-800 shrink-0"
+                              onerror="this.style.display='none'" />
+                          `
+                              : ""
+                          }
+                          <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2">
+                              <span class="text-xs font-medium text-indigo-300">${e.object_class}</span>
+                              <span class="text-xs px-1.5 py-0.5 rounded ${
+                                e.event_type === "entry"
+                                  ? "bg-green-900 text-green-400"
+                                  : e.event_type === "exit"
+                                    ? "bg-red-900 text-red-400"
+                                    : "bg-yellow-900 text-yellow-400"
+                              }">${e.event_type}</span>
+                              <span class="text-xs text-gray-600">Track #${e.track_id}</span>
+                            </div>
+                            <div class="text-xs text-gray-500 mt-0.5">${fmt(e.first_seen)} → ${fmt(e.last_seen)} · ${e.duration?.toFixed(1) ?? "?"}s</div>
+                          </div>
+                          <div class="text-xs text-gray-600">${(e.best_confidence * 100).toFixed(0)}%</div>
+                          ${e.attributes ? renderAttributes(e.attributes) : ""}
+                        </div>
+                      `,
+                        )
+                        .join("")}
                     </div>
-                    <div class="text-xs text-gray-600">${(e.best_confidence * 100).toFixed(0)}%</div>
-                    ${e.attributes ? renderAttributes(e.attributes) : ""}
-                  </div>
-                `,
-                  )
-                  .join("")}
-              </div>
-            `;
+                  `;
           }
           lucide.createIcons();
         } catch (e) {

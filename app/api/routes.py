@@ -153,13 +153,31 @@ def search_track_events(
 ):
     """Search track lifecycle events (entry/exit/dwell) semantically."""
     retriever = ObjectRetriever(db, top_k=top_k)
-    results = retriever.search_track_events(
-        query=q,
-        video_filename=video_filename,
-        camera_id=camera_id,
-        event_type=event_type,
-        object_class=object_class,
+
+    # Semantic search
+    semantic = retriever.search_track_events(
+        query=q, video_filename=video_filename,
+        camera_id=camera_id, event_type=event_type, object_class=object_class,
     )
+
+    # Attribute keyword search — catches color/type/clothing queries semantic misses
+    keyword = retriever.attribute_keyword_search(
+        query=q, video_filename=video_filename,
+        event_type=event_type, object_class=object_class, top_k=top_k,
+    )
+
+    # Merge: keyword hits first, then semantic hits not already present
+    seen = {r["event_id"] for r in keyword}
+    merged = keyword[:]
+    for r in semantic:
+        if r["event_id"] not in seen:
+            merged.append(r)
+            seen.add(r["event_id"])
+    for r in merged:
+        if "match_type" not in r:
+            r["match_type"] = "semantic"
+
+    results = merged[:top_k]
     return {"query": q, "count": len(results), "results": results}
 
 

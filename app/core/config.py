@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     # Crops are used for Phase 6B attribute extraction
     crop_min_confidence: float = Field(0.5, alias="CROP_MIN_CONFIDENCE")
 
+    # ── Phase 6B: Attribute extraction control ────────────────────────────────
+
+    # Set to false to run 6A only (fast — skips minicpm-v crop extraction).
+    # 6B can always be triggered manually via POST /extract-attributes/{video}
+    # even when this is False. Default True so the full pipeline runs end-to-end.
+    enable_phase_6b: bool = Field(True, alias="ENABLE_PHASE_6B")
+
     # ── Paths ─────────────────────────────────────────────────────────────────
 
     video_input_path: str = Field(..., alias="VIDEO_INPUT_PATH")

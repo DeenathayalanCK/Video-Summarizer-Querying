@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from app.storage.models import DetectedObject, DetectedObjectEmbedding, TrackEvent, TrackEventEmbedding
 from app.rag.embedder import OllamaEmbedder
@@ -18,7 +19,7 @@ class ObjectIndexer:
         self.settings = get_settings()
         self.logger = get_logger()
 
-    def index_detected_object(self, obj: DetectedObject) -> DetectedObjectEmbedding:
+    def index_detected_object(self, obj: DetectedObject) -> Optional[DetectedObjectEmbedding]:
         """Embed a single DetectedObject's rag_text."""
         existing = (
             self.db.query(DetectedObjectEmbedding)
@@ -43,7 +44,7 @@ class ObjectIndexer:
         self.db.refresh(emb)
         return emb
 
-    def index_track_event(self, event: TrackEvent) -> TrackEventEmbedding:
+    def index_track_event(self, event: TrackEvent) -> Optional[TrackEventEmbedding]:
         """Embed a single TrackEvent's rag_text."""
         existing = (
             self.db.query(TrackEventEmbedding)

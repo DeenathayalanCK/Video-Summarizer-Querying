@@ -1,5 +1,5 @@
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.storage.models import (
     Caption, Event, VideoSummary, ProcessingStatus,
@@ -280,7 +280,7 @@ class EventRepository:
         if row:
             row.phase_6b_completed = True
             row.phase_6b_tracks_attributed = tracks_attributed
-            row.updated_at = __import__("datetime").datetime.utcnow()
+            row.updated_at = datetime.utcnow()
             self.db.commit()
 
     def has_6b_completed(self, video_filename: str) -> bool:

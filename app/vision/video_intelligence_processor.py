@@ -116,10 +116,12 @@ class VideoIntelligenceProcessor:
         try:
             # ── Duplicate prevention ──────────────────────────────────────────
             if repo.is_completed(video_file):
-                # Phase 6A done — but run 6B (attributes) if not yet extracted.
-                # has_6b_completed is False on all existing videos (column defaults False).
-                # This lets us extract attributes without re-running YOLO.
-                if not repo.has_6b_completed(video_file) and repo.has_detection_data(video_file):
+                # Phase 6A done — run 6B (attributes) if not yet extracted AND enabled.
+                if (
+                    self.settings.enable_phase_6b
+                    and not repo.has_6b_completed(video_file)
+                    and repo.has_detection_data(video_file)
+                ):
                     self.logger.info(
                         "video_6a_complete_running_6b_attributes", video=video_file,
                     )
@@ -278,7 +280,9 @@ class VideoIntelligenceProcessor:
             # Runs after all track events are saved.
             # Calls minicpm-v on the best crop per unique track_id.
             # Upgrades rag_text with color/type/clothing attributes and re-embeds.
-            if not self._shutdown_requested and track_states:
+            # Gated by ENABLE_PHASE_6B=true in .env (default: true).
+            # Can always be triggered manually via POST /extract-attributes/{video}.
+            if not self._shutdown_requested and track_states and self.settings.enable_phase_6b:
                 self.logger.info("attribute_extraction_starting", video=video_file)
                 try:
                     attr_processor = AttributeProcessor(db)

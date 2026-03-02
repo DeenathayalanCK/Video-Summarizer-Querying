@@ -1,5 +1,6 @@
 import re
 import requests
+from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -178,7 +179,7 @@ class VideoSummarizer:
             existing.caption_count = event_count
             existing.duration_seconds = duration
             existing.model_name = self.model
-            existing.updated_at = __import__("datetime").datetime.utcnow()
+            existing.updated_at = datetime.utcnow()
             self.db.commit()
             self.db.refresh(existing)
             return existing
@@ -264,7 +265,7 @@ class VideoSummarizer:
             existing.caption_count = caption_count
             existing.duration_seconds = duration
             existing.model_name = self.model
-            existing.updated_at = __import__("datetime").datetime.utcnow()
+            existing.updated_at = datetime.utcnow()
             self.db.commit()
             self.db.refresh(existing)
             return existing

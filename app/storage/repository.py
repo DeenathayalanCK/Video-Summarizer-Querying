@@ -77,6 +77,8 @@ class EventRepository:
             total_frames_sampled=total_frames,
             scenes_detected=0,
             scenes_captioned=0,
+            phase_6b_completed=False,
+            phase_6b_tracks_attributed=None,
             last_error=None,
         )
 
@@ -295,3 +297,28 @@ class EventRepository:
             .filter(DetectedObject.video_filename == video_filename)
             .first()
         ) is not None
+
+    def has_track_event_data(self, video_filename: str) -> bool:
+        """Check if TrackEvent data exists for this video."""
+        return (
+            self.db.query(TrackEvent)
+            .filter(TrackEvent.video_filename == video_filename)
+            .first()
+        ) is not None
+
+    def clear_detection_data(self, video_filename: str) -> None:
+        """
+        Remove all Phase 6A rows for a video.
+        Used to make failed/retried processing idempotent.
+        """
+        (
+            self.db.query(DetectedObject)
+            .filter(DetectedObject.video_filename == video_filename)
+            .delete(synchronize_session=False)
+        )
+        (
+            self.db.query(TrackEvent)
+            .filter(TrackEvent.video_filename == video_filename)
+            .delete(synchronize_session=False)
+        )
+        self.db.commit()

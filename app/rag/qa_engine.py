@@ -8,7 +8,7 @@ from app.rag.retriever import CaptionRetriever
 from app.rag.object_retriever import ObjectRetriever
 from app.rag.summarizer import _condense_caption
 from app.storage.repository import EventRepository
-from app.storage.models import Caption, TrackEvent
+from app.storage.models import Caption, TrackEvent, VideoSummary
 from app.prompts.qa_prompt import (
     QA_SYSTEM_PROMPT,
     QA_USER_TEMPLATE,
@@ -99,6 +99,21 @@ class QAEngine:
         for h in detection_hits:
             involved_videos.add(h["video_filename"])
 
+        # ── Collect video summaries for narrative context ──────────────────────
+        # Detection data alone can't answer "what was he doing?" — only presence
+        # and duration. The summary adds behavioural narrative from the LLM pass.
+        summary_lines = []
+        for vf in sorted(involved_videos):
+            summary = (
+                self.db.query(VideoSummary)
+                .filter(VideoSummary.video_filename == vf)
+                .first()
+            )
+            if summary and summary.summary_text:
+                summary_lines.append(f"[{vf}]\n{summary.summary_text}")
+        summary_context = "\n\n".join(summary_lines) if summary_lines else "No summary available."
+
+        # ── Build chronological detection timeline ─────────────────────────────
         timeline_lines = []
         for vf in sorted(involved_videos):
             events = (
@@ -124,14 +139,20 @@ class QAEngine:
                         gender = attrs.get("gender_estimate", "")
                         top = attrs.get("clothing_top", "")
                         bottom = attrs.get("clothing_bottom", "")
+                        carrying = attrs.get("carrying", "")
                         parts = [p for p in [gender, top, bottom] if p and p not in ("unknown", "none")]
+                        if carrying and carrying not in ("unknown", "none"):
+                            parts.append(f"carrying {carrying}")
                         attr_str = ", ".join(parts)
 
                 obj_desc = f"{attr_str} {ev.object_class}".strip() if attr_str else ev.object_class
+                # Convert seconds to mm:ss for readability
+                def fmt(s):
+                    return f"{int(s)//60}:{int(s)%60:02d}"
                 timeline_lines.append(
-                    f"[{vf} @ {ev.first_seen_second:.1f}s-{ev.last_seen_second:.1f}s] "
+                    f"[{vf} @ {fmt(ev.first_seen_second)}-{fmt(ev.last_seen_second)}] "
                     f"{ev.event_type.upper()}: {obj_desc} track #{ev.track_id} "
-                    f"(duration: {ev.duration_seconds:.1f}s, conf: {ev.best_confidence or 0:.0%})"
+                    f"(duration: {ev.duration_seconds:.0f}s, conf: {ev.best_confidence or 0:.0%})"
                 )
 
         context = "\n".join(timeline_lines)
@@ -140,6 +161,7 @@ class QAEngine:
             "model": self.model,
             "system": QA_DETECTION_SYSTEM_PROMPT,
             "prompt": QA_DETECTION_USER_TEMPLATE.format(
+                summary=summary_context,
                 events=context,
                 question=question,
             ),

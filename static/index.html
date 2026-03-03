@@ -1102,6 +1102,11 @@
         if (r.attributes) {
           const a = r.attributes;
           const cls = a.object_class || r.object_class || "";
+          // visible_text: text on clothing/badges e.g. "SECURITY"
+          const visText =
+            a.visible_text && !["none", "unknown", ""].includes(a.visible_text)
+              ? a.visible_text
+              : null;
           const pills = [];
           if (cls === "person") {
             if (a.gender_estimate && a.gender_estimate !== "unknown")
@@ -1124,17 +1129,20 @@
               pills.push(a.make_estimate);
             if (a.plate_visible) pills.push("plate visible");
           }
-          if (pills.length) {
-            attrHtml =
-              '<div class="flex gap-1 flex-wrap mt-1.5">' +
+          const visHtml = visText
+            ? `<div class="text-xs font-bold text-orange-300 bg-orange-500/10 border border-orange-500/30 rounded px-1.5 py-0.5 mt-1.5 inline-block tracking-wide">${visText}</div>`
+            : "";
+          const pillsHtml = pills.length
+            ? '<div class="flex gap-1 flex-wrap mt-1.5">' +
               pills
                 .map(
                   (p) =>
                     `<span class="text-xs px-2 py-0.5 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-300">${p}</span>`,
                 )
                 .join("") +
-              "</div>";
-          }
+              "</div>"
+            : "";
+          attrHtml = visHtml + pillsHtml;
         }
 
         // Build proof section (rag_text shown on expand)
@@ -1360,6 +1368,11 @@
                     let attrHtml = "";
                     if (item.attributes) {
                       const a = item.attributes;
+                      const visText =
+                        a.visible_text &&
+                        !["none", "unknown", ""].includes(a.visible_text)
+                          ? a.visible_text
+                          : null;
                       const pills = [];
                       if (cls === "person") {
                         if (
@@ -1391,16 +1404,20 @@
                         if (a.make_estimate && a.make_estimate !== "unknown")
                           pills.push(a.make_estimate);
                       }
-                      if (pills.length)
-                        attrHtml =
-                          '<div class="flex gap-1 flex-wrap mt-1.5">' +
+                      const visHtml = visText
+                        ? `<div class="text-xs font-bold text-orange-300 bg-orange-500/10 border border-orange-500/30 rounded px-1.5 py-0.5 mt-1.5 inline-block tracking-wide">${visText}</div>`
+                        : "";
+                      const pillsHtml = pills.length
+                        ? '<div class="flex gap-1 flex-wrap mt-1.5">' +
                           pills
                             .map(
                               (p) =>
                                 `<span class="text-xs px-2 py-0.5 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-300">${p}</span>`,
                             )
                             .join("") +
-                          "</div>";
+                          "</div>"
+                        : "";
+                      attrHtml = visHtml + pillsHtml;
                     }
 
                     // Dwell badge
@@ -1521,6 +1538,12 @@
         if (!attrs) return "";
         const cls = attrs.object_class || "";
         const parts = [];
+        // visible_text: text printed on clothing/badges e.g. "SECURITY", "POLICE"
+        const visibleText =
+          attrs.visible_text &&
+          !["none", "unknown", ""].includes(attrs.visible_text)
+            ? attrs.visible_text
+            : null;
 
         if (cls === "person") {
           if (attrs.gender_estimate && attrs.gender_estimate !== "unknown")
@@ -1549,8 +1572,16 @@
           if (attrs.plate_visible) parts.push("plate visible");
         }
 
-        if (!parts.length) return "";
-        return `<div class="text-xs text-yellow-400 mt-1 truncate" title="${parts.join(", ")}">${parts.join(" · ")}</div>`;
+        if (!parts.length && !visibleText) return "";
+        let html = "";
+        // Visible text (e.g. "SECURITY") shown as a prominent badge first
+        if (visibleText) {
+          html += `<div class="text-xs font-bold text-orange-300 bg-orange-500/10 border border-orange-500/30 rounded px-1.5 py-0.5 mt-1.5 inline-block tracking-wide">${visibleText}</div>`;
+        }
+        if (parts.length) {
+          html += `<div class="text-xs text-yellow-400 mt-1 break-words leading-relaxed">${parts.join(" · ")}</div>`;
+        }
+        return html;
       }
 
       // ── Detections ─────────────────────────────────────────────────────────────────

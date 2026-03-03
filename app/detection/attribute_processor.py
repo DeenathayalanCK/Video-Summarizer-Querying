@@ -170,6 +170,7 @@ class AttributeProcessor:
                     clothing_bottom=person_attrs.clothing_bottom,
                     head_covering=person_attrs.head_covering,
                     carrying=person_attrs.carrying,
+                    visible_text=person_attrs.visible_text,
                 )
             else:
                 self.logger.info(
@@ -211,6 +212,7 @@ class AttributeProcessor:
                         clothing_bottom=person_attrs.clothing_bottom,
                         head_covering=person_attrs.head_covering,
                         carrying=person_attrs.carrying,
+                        visible_text=person_attrs.visible_text,
                     )
                 else:
                     # Entry event

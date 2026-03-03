@@ -130,13 +130,16 @@ class VideoIntelligenceProcessor:
                     self.logger.info("video_already_completed_skipping", video=video_file)
                 return
 
-            # If a prior run partially saved rows (e.g. failed/recovered), clear and retry cleanly.
+            # Prior run left partial data (failed/recovered/crashed mid-run).
+            # Use reset_for_rerun: deletes all rows INCLUDING embeddings and summary,
+            # resets 6B state, then marks pending so mark_running gets a clean slate.
+            # Without this, embeddings from run 1 + new detections from run 2 = doubles.
             if repo.has_detection_data(video_file) or repo.has_track_event_data(video_file):
                 self.logger.warning(
                     "video_reprocess_clearing_existing_phase_6a_data",
                     video=video_file,
                 )
-                repo.clear_detection_data(video_file)
+                repo.reset_for_rerun(video_file, self.settings.camera_id)
 
             # ── Reset tracker state from any previous video ───────────────────
             self.detector.reset_tracker()
@@ -412,4 +415,3 @@ class VideoIntelligenceProcessor:
                 action="skipping_frame_continuing",
             )
             return None
-

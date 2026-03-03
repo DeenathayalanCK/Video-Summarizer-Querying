@@ -38,9 +38,10 @@ JSON fields:
 - "clothing_bottom": color and type of lower body clothing (e.g. "blue jeans", "dark trousers", "unknown")
 - "head_covering": any hat, helmet, hood, or "none" or "unknown"
 - "carrying": any visible bags, backpacks, objects or "none" or "unknown"
+- "visible_text": any readable text ON clothing, badges, vests, hats (e.g. "SECURITY", "POLICE", "STAFF", a name or number). Use "none" if no text is visible.
 
 Example output:
-{"gender_estimate": "male", "clothing_top": "dark jacket", "clothing_bottom": "blue jeans", "head_covering": "none", "carrying": "backpack"}
+{"gender_estimate": "male", "clothing_top": "white shirt", "clothing_bottom": "dark trousers", "head_covering": "none", "carrying": "none", "visible_text": "SECURITY"}
 
 Now analyze the person in this image:"""
 
@@ -99,6 +100,7 @@ def build_person_rag_text(
     clothing_bottom: str = "unknown",
     head_covering: str = "unknown",
     carrying: str = "unknown",
+    visible_text: str = "none",
 ) -> str:
     """
     Build enriched RAG text for a person TrackEvent.
@@ -125,6 +127,8 @@ def build_person_rag_text(
         clothing_parts.append(f"with {head_covering}")
     if carrying and carrying not in ("unknown", "none"):
         clothing_parts.append(f"carrying {carrying}")
+    if visible_text and visible_text not in ("unknown", "none"):
+        clothing_parts.append(f'wearing text "{visible_text}"')
 
     appearance = " ".join(appearance_parts)
     clothing_str = ", ".join(clothing_parts)

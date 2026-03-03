@@ -150,10 +150,12 @@ class VideoSummarizer:
             f"DWELL EVENTS (prolonged presence):\n{_fmt_events(dwell_events)}"
         )
 
+        duration_mm = f"{int(duration)//60}:{int(duration)%60:02d}"
         user_message = TRACK_SUMMARY_USER_TEMPLATE.format(
             video_filename=video_filename,
             camera_id=camera_id,
             duration=duration,
+            duration_mm=duration_mm,
             event_count=event_count,
             events=event_block,
         )

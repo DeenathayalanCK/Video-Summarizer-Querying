@@ -58,6 +58,7 @@ class PersonAttributes:
     clothing_bottom: str = "unknown"
     head_covering: str = "unknown"
     carrying: str = "unknown"
+    visible_text: str = "none"   # text printed on clothing/badge e.g. "SECURITY"
 
     def to_dict(self) -> dict:
         return {
@@ -66,6 +67,7 @@ class PersonAttributes:
             "clothing_bottom": self.clothing_bottom,
             "head_covering": self.head_covering,
             "carrying": self.carrying,
+            "visible_text": self.visible_text,
         }
 
     @property
@@ -267,6 +269,8 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
             clothing_bottom=str(data.get("clothing_bottom", "unknown")).lower().strip(),
             head_covering=str(data.get("head_covering", "unknown")).lower().strip(),
             carrying=str(data.get("carrying", "unknown")).lower().strip(),
+            # visible_text keeps its original case — "SECURITY" not "security"
+            visible_text=str(data.get("visible_text", "none")).strip(),
         )
 
         self.logger.info(

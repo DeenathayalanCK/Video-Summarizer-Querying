@@ -177,7 +177,22 @@ def search_track_events(
         if "match_type" not in r:
             r["match_type"] = "semantic"
 
-    results = merged[:top_k]
+    # Deduplicate by track_id: one physical object = one search card.
+    # A car generates entry+exit+dwell rows (different event_ids but same track).
+    # Keep the highest-scoring event; attach others as also_events for UI context.
+    track_best: dict[str, dict] = {}
+    for r in merged:
+        k = f"{r['video_filename']}:{r['track_id']}"
+        if k not in track_best:
+            track_best[k] = {**r, "also_events": []}
+        elif r["score"] > track_best[k]["score"]:
+            prev = {kk: vv for kk, vv in track_best[k].items() if kk != "also_events"}
+            also = track_best[k]["also_events"]
+            track_best[k] = {**r, "also_events": also + [prev]}
+        else:
+            track_best[k]["also_events"].append(r)
+
+    results = list(track_best.values())[:top_k]
     return {"query": q, "count": len(results), "results": results}
 
 

@@ -70,11 +70,24 @@ class Settings(BaseSettings):
     # Crops are used for Phase 6B attribute extraction
     crop_min_confidence: float = Field(0.5, alias="CROP_MIN_CONFIDENCE")
 
+    # ── Phase 6A: Track quality filters ──────────────────────────────────────
+
+    # Minimum number of sampled frames a track must appear in to be kept.
+    # Filters out ghost tracks (reflections, partial occlusion, 1-frame blips).
+    # At 1 FPS: min_visible_frames=2 means object must appear in ≥2 seconds.
+    min_visible_frames: int = Field(2, alias="MIN_VISIBLE_FRAMES")
+
+    # Maximum time gap (seconds) between two tracks of the same class for them
+    # to be considered the SAME physical object and merged.
+    # Solves: security guard who sleeps/moves → ByteTrack assigns new track_id
+    # on return. If gap < this value, both tracks are merged into one.
+    # At 1 FPS on a 10-min video: 30s is conservative, 60s covers most cases.
+    merge_gap_seconds: float = Field(30.0, alias="MERGE_GAP_SECONDS")
+
     # ── Phase 6B: Attribute extraction control ────────────────────────────────
 
-    # Set to false to run 6A only (fast — skips minicpm-v crop extraction).
+    # Set false to skip minicpm-v crop analysis after YOLO (default: true).
     # 6B can always be triggered manually via POST /extract-attributes/{video}
-    # even when this is False. Default True so the full pipeline runs end-to-end.
     enable_phase_6b: bool = Field(True, alias="ENABLE_PHASE_6B")
 
     # ── Paths ─────────────────────────────────────────────────────────────────

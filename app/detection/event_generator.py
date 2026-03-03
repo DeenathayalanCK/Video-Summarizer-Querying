@@ -1,3 +1,21 @@
+"""
+event_generator.py — Phase 6A lifecycle event producer.
+
+Two key improvements over the original:
+
+1. GHOST TRACK FILTER
+   ByteTrack at 1 FPS can create very short tracks (1-2 detections) from
+   partial occlusion, reflections, or objects briefly crossing frame edge.
+   We drop tracks seen in fewer than MIN_VISIBLE_FRAMES frames.
+
+2. TRACK CONTINUITY MERGING
+   A single physical person in a 10-min room video may lose their track ID
+   multiple times (moves fast, sits still, occlusion, brief exit).
+   ByteTrack assigns a NEW track_id each time.
+   We merge tracks of the SAME class whose time gaps < merge_gap_seconds
+   into a single canonical track (first track_id, best crop kept).
+"""
+
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -38,26 +56,28 @@ class GeneratedEvent:
 
 class EventGenerator:
     """
-    Processes all DetectedObject records for a video and produces
+    Processes all TrackState records for a video and produces
     meaningful lifecycle events (entry, exit, dwell).
 
-    Runs AFTER the full frame loop completes — it needs the complete
-    picture of when each track_id appeared/disappeared.
+    Runs AFTER the full frame loop completes.
 
-    Design decisions:
-    - entry:  generated for every track_id (always fires)
-    - exit:   generated when a track disappears for > exit_gap_seconds
-    - dwell:  generated additionally when duration > dwell_threshold_seconds
-              (a long entry is both an entry AND a dwell event)
+    Pipeline:
+      1. Filter ghost tracks (frame_count < min_visible_frames)
+      2. Merge fragmented tracks of same class within merge_gap_seconds
+      3. Generate entry / dwell / exit events for surviving tracks
     """
 
     def __init__(
         self,
         dwell_threshold_seconds: float = 10.0,
         exit_gap_seconds: float = 3.0,
+        min_visible_frames: int = 2,
+        merge_gap_seconds: float = 30.0,
     ):
         self.dwell_threshold = dwell_threshold_seconds
         self.exit_gap = exit_gap_seconds
+        self.min_visible_frames = min_visible_frames
+        self.merge_gap = merge_gap_seconds
         self.logger = get_logger()
 
     def generate(
@@ -67,21 +87,37 @@ class EventGenerator:
     ) -> list[GeneratedEvent]:
         """
         Convert accumulated TrackState data into GeneratedEvent objects.
-
-        Args:
-            track_states:    dict of track_id → TrackState, built during frame loop
-            video_duration:  total duration of the processed video in seconds
-
-        Returns:
-            List of GeneratedEvent objects ready to be written to TrackEvent table
         """
-        events = []
+        # Step 1: Filter ghost tracks
+        valid_states = {
+            tid: state for tid, state in track_states.items()
+            if state.frame_count >= self.min_visible_frames
+        }
+        ghost_count = len(track_states) - len(valid_states)
+        if ghost_count:
+            self.logger.info(
+                "ghost_tracks_filtered",
+                removed=ghost_count,
+                min_frames=self.min_visible_frames,
+            )
 
-        for track_id, state in track_states.items():
+        # Step 2: Merge fragmented tracks
+        merged_states = self._merge_fragmented_tracks(valid_states)
+        merge_count = len(valid_states) - len(merged_states)
+        if merge_count:
+            self.logger.info(
+                "fragmented_tracks_merged",
+                before=len(valid_states),
+                after=len(merged_states),
+                merged=merge_count,
+            )
+
+        # Step 3: Generate events
+        events = []
+        for track_id, state in merged_states.items():
             duration = state.last_seen - state.first_seen
 
-            # Always generate an entry event
-            entry = GeneratedEvent(
+            events.append(GeneratedEvent(
                 track_id=track_id,
                 object_class=state.object_class,
                 event_type="entry",
@@ -92,12 +128,10 @@ class EventGenerator:
                 best_crop_path=state.best_crop_path,
                 best_confidence=state.best_confidence,
                 rag_text=self._build_entry_rag_text(state, duration),
-            )
-            events.append(entry)
+            ))
 
-            # Dwell event if object was present for a meaningful time
             if duration >= self.dwell_threshold:
-                dwell = GeneratedEvent(
+                events.append(GeneratedEvent(
                     track_id=track_id,
                     object_class=state.object_class,
                     event_type="dwell",
@@ -108,13 +142,10 @@ class EventGenerator:
                     best_crop_path=state.best_crop_path,
                     best_confidence=state.best_confidence,
                     rag_text=self._build_dwell_rag_text(state, duration),
-                )
-                events.append(dwell)
+                ))
 
-            # Exit event if the object disappeared before end of video
-            disappeared_before_end = (video_duration - state.last_seen) > self.exit_gap
-            if disappeared_before_end:
-                exit_ev = GeneratedEvent(
+            if (video_duration - state.last_seen) > self.exit_gap:
+                events.append(GeneratedEvent(
                     track_id=track_id,
                     object_class=state.object_class,
                     event_type="exit",
@@ -125,34 +156,78 @@ class EventGenerator:
                     best_crop_path=state.best_crop_path,
                     best_confidence=state.best_confidence,
                     rag_text=self._build_exit_rag_text(state, duration),
-                )
-                events.append(exit_ev)
+                ))
 
         self.logger.info(
             "events_generated",
             total=len(events),
-            tracks=len(track_states),
+            tracks=len(merged_states),
             entry=sum(1 for e in events if e.event_type == "entry"),
             exit=sum(1 for e in events if e.event_type == "exit"),
             dwell=sum(1 for e in events if e.event_type == "dwell"),
         )
         return events
 
-    def _build_entry_rag_text(self, state: TrackState, duration: float) -> str:
+    def _merge_fragmented_tracks(
+        self,
+        states: dict[int, TrackState],
+    ) -> dict[int, TrackState]:
         """
-        Build the RAG embedding text for an entry event.
-        This text is what gets embedded into pgvector and searched against.
-        It is human-readable and query-friendly — written to match how
-        a user would ask about this event.
-        """
-        cls = state.object_class
-        appeared = f"{state.first_seen:.1f}s"
-        last = f"{state.last_seen:.1f}s"
-        dur = f"{duration:.1f}s"
+        Merge tracks of same class that are close in time.
 
+        ByteTrack re-assigns a new track_id when it "loses" someone —
+        e.g. a security guard who sits still, sleeps, walks behind a desk.
+        If the gap between track A ending and track B starting is within
+        merge_gap_seconds, they are combined into a single canonical track.
+
+        The canonical track keeps the FIRST track_id and the BEST crop.
+        """
+        if not states:
+            return states
+
+        by_class: dict[str, list[TrackState]] = {}
+        for state in states.values():
+            by_class.setdefault(state.object_class, []).append(state)
+
+        merged: dict[int, TrackState] = {}
+
+        for cls, group in by_class.items():
+            group.sort(key=lambda s: s.first_seen)
+            canonical = group[0]
+
+            for current in group[1:]:
+                gap = current.first_seen - canonical.last_seen
+
+                if gap <= self.merge_gap:
+                    # Absorb current into canonical
+                    canonical.last_seen = max(canonical.last_seen, current.last_seen)
+                    canonical.frame_count += current.frame_count
+                    canonical.all_seconds.extend(current.all_seconds)
+                    if current.best_confidence > canonical.best_confidence:
+                        canonical.best_confidence = current.best_confidence
+                        canonical.best_second = current.best_second
+                        if current.best_crop_path:
+                            canonical.best_crop_path = current.best_crop_path
+                    self.logger.debug(
+                        "tracks_merged",
+                        canonical_id=canonical.track_id,
+                        absorbed_id=current.track_id,
+                        gap_seconds=round(gap, 1),
+                        cls=cls,
+                    )
+                else:
+                    merged[canonical.track_id] = canonical
+                    canonical = current
+
+            merged[canonical.track_id] = canonical
+
+        return merged
+
+    def _build_entry_rag_text(self, state: TrackState, duration: float) -> str:
+        cls = state.object_class
         return (
-            f"{cls.capitalize()} (track #{state.track_id}) appeared at {appeared} "
-            f"and was visible until {last} (duration: {dur}). "
+            f"{cls.capitalize()} (track #{state.track_id}) appeared at {state.first_seen:.1f}s "
+            f"and was visible until {state.last_seen:.1f}s (duration: {duration:.1f}s). "
             f"Detected with {state.best_confidence:.0%} confidence."
         )
 
@@ -180,10 +255,7 @@ def build_detection_rag_text(
     confidence: float,
     quadrant: str,
 ) -> str:
-    """
-    Build per-detection RAG text (for DetectedObject row).
-    Simpler than track event text — describes one moment in time.
-    """
+    """Build per-detection RAG text (for DetectedObject row)."""
     track_info = f"track #{track_id}" if track_id is not None else "untracked"
     return (
         f"{object_class.capitalize()} ({track_info}) detected at {frame_second:.1f}s "

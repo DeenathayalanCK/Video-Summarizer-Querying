@@ -21,6 +21,14 @@ SURVEILLANCE_CLASSES = {
     # Future: 16=dog, 24=backpack, 26=handbag, 28=suitcase
 }
 
+# Path to custom ByteTrack config tuned for 1 FPS security cameras.
+# Relative to the repo root (mounted as /app in Docker).
+# Falls back to bundled "bytetrack.yaml" if not found.
+_TRACKER_CONFIG = os.path.join(
+    os.path.dirname(__file__), "..", "..", "config", "bytetrack_surveillance.yaml"
+)
+TRACKER_CONFIG = _TRACKER_CONFIG if os.path.exists(_TRACKER_CONFIG) else "bytetrack.yaml"
+
 
 @dataclass
 class Detection:
@@ -186,8 +194,8 @@ class ObjectDetector:
             verbose=False,
             conf=self.settings.yolo_confidence_threshold,
             classes=list(SURVEILLANCE_CLASSES.keys()),
-            tracker="bytetrack.yaml",  # bundled with ultralytics
-            persist=True,              # maintains track state across frames
+            tracker=TRACKER_CONFIG,  # custom 1-FPS surveillance config
+            persist=True,            # maintains track state across frames
         )
 
         if not predictions or predictions[0].boxes is None:

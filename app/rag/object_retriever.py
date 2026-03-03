@@ -248,12 +248,20 @@ class ObjectRetriever:
 
     def get_track_timeline(self, video_filename: str) -> list[dict]:
         """
-        Return all TrackEvents for a video in chronological order.
-        Used by the Timeline tab in the UI.
+        Return one timeline entry per unique tracked object, in chronological order.
+
+        We use only ENTRY events — they already carry first_seen, last_seen,
+        and duration. Showing entry + exit + dwell for the same track produces
+        visual duplicates in the UI (same timestamp, same crop, same text).
+
+        Each card in the timeline represents one physical object's full lifespan.
         """
         rows = (
             self.db.query(TrackEvent)
-            .filter(TrackEvent.video_filename == video_filename)
+            .filter(
+                TrackEvent.video_filename == video_filename,
+                TrackEvent.event_type == "entry",   # one row per track
+            )
             .order_by(TrackEvent.first_seen_second)
             .all()
         )
@@ -267,6 +275,10 @@ class ObjectRetriever:
                 "duration": r.duration_seconds,
                 "best_frame_second": r.best_frame_second,
                 "best_crop_path": r.best_crop_path,
+                "best_confidence": round(r.best_confidence or 0, 3),
+                "attributes": r.attributes,
+                # Convenience flags for timeline card rendering
+                "has_dwell": r.duration_seconds >= 10.0,
             }
             for r in rows
         ]

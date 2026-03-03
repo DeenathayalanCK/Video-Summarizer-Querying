@@ -1,0 +1,23 @@
+# ByteTrack config tuned for security surveillance at 1 FPS sampling
+#
+# Default bytetrack.yaml is designed for 30 FPS video.
+# At 1 FPS, every "frame gap" is 1 second of real time, so a person who
+# briefly leaves frame or is occluded will get a new track_id under defaults.
+#
+# Key changes vs defaults:
+#   track_buffer:    30 → 90   At 1 FPS, 90 frames = 90 seconds of forgiveness.
+#                              A security guard who walks behind a desk for up to
+#                              90 seconds will re-associate as the SAME track.
+#   match_thresh:    0.8 → 0.7 More lenient IOU matching — at 1 FPS the person
+#                              can move significantly between frames.
+#   new_track_thresh: 0.6 → 0.45  Lower bar to re-associate an existing track
+#                                 vs creating a brand new one.
+#   track_high_thresh: 0.5 → 0.45 Accept slightly lower conf detections into
+#                                  existing tracks (helps with partial occlusion).
+
+tracker_type: bytetrack
+track_high_thresh: 0.45
+track_low_thresh: 0.1
+new_track_thresh: 0.45
+track_buffer: 90
+match_thresh: 0.7

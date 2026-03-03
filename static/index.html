@@ -728,6 +728,14 @@
         woman: "person",
         male: "person",
         female: "person",
+        guard: "person",
+        officer: "person",
+        worker: "person",
+        suspect: "person",
+        individual: "person",
+        subject: "person",
+        intruder: "person",
+        staff: "person",
         car: "car",
         sedan: "car",
         vehicle: "car",
@@ -941,8 +949,13 @@
 
           // Separate exact (>=51%) from similar (<51%)
           const THRESHOLD = 0.51;
-          const exactEv = evResults.filter((r) => r.score >= THRESHOLD);
-          const similarEv = evResults.filter((r) => r.score < THRESHOLD);
+          // Attribute keyword matches are always treated as "exact" regardless
+          // of semantic distance — if "man" matched "male" via synonym, show it first.
+          const isExact = (r) =>
+            r.score >= THRESHOLD || r.match_type === "attribute_keyword";
+
+          const exactEv = evResults.filter(isExact);
+          const similarEv = evResults.filter((r) => !isExact(r));
           const exactObj = objResults.filter((r) => r.score >= THRESHOLD);
           const similarObj = objResults.filter((r) => r.score < THRESHOLD);
           const exactCap = capResults.filter((r) => r.score >= THRESHOLD);
@@ -1058,6 +1071,23 @@
           r.match_type === "attribute_keyword"
             ? '<span class="text-xs px-1.5 py-0.5 rounded bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">attr</span>'
             : "";
+        // Show entry/exit/dwell tags for the other events on this same track
+        const alsoEvents = r.also_events || [];
+        const alsoTypes = [...new Set(alsoEvents.map((e) => e.event_type))];
+        const alsoHtml = alsoTypes.length
+          ? alsoTypes
+              .map((t) => {
+                const c =
+                  {
+                    entry: "text-green-300 border-green-500/30 bg-green-500/10",
+                    exit: "text-red-300 border-red-500/30 bg-red-500/10",
+                    dwell:
+                      "text-yellow-300 border-yellow-500/30 bg-yellow-500/10",
+                  }[t] || "text-gray-300 border-gray-500/30";
+                return `<span class="text-xs px-1.5 py-0.5 rounded-full border ${c}">+${t}</span>`;
+              })
+              .join("")
+          : "";
         const evColors = {
           entry: "bg-green-500/10 text-green-300 border-green-500/30",
           exit: "bg-red-500/10 text-red-300 border-red-500/30",
@@ -1132,6 +1162,7 @@
                       <span class="text-xs font-semibold text-white capitalize">${r.object_class} #${r.track_id}</span>
                       <span class="text-xs px-2 py-0.5 rounded-full border ${evStyle} font-medium">${r.event_type}</span>
                       ${matchBadge}
+                      ${alsoHtml}
                       <span class="text-xs text-gray-500 truncate">${r.video_filename}</span>
                       <span class="text-xs font-semibold ${scoreColor} ml-auto">${score}% match</span>
                     </div>
@@ -1294,42 +1325,134 @@
 
         try {
           const data = await apiFetch(`/timeline/${encodeURIComponent(video)}`);
+
+          // Build class → color mapping for timeline dots
+          const clsColor = {
+            person: "bg-indigo-500",
+            car: "bg-blue-500",
+            truck: "bg-orange-500",
+            bus: "bg-yellow-500",
+            motorcycle: "bg-pink-500",
+            bicycle: "bg-teal-500",
+          };
+
           el.innerHTML = `
-            <p class="text-xs text-gray-500 mb-4">${data.count} events in <span class="text-white">${video}</span></p>
+            <p class="text-xs text-gray-500 mb-6">
+              ${data.count} object${data.count !== 1 ? "s" : ""} detected in
+              <span class="text-white font-medium">${video}</span>
+              <span class="text-gray-600 ml-2">(${data.pipeline} pipeline)</span>
+            </p>
             <div class="relative">
               <div class="absolute left-6 top-0 bottom-0 w-px bg-gray-800"></div>
-              <div class="space-y-4">
+              <div class="space-y-3">
                 ${data.timeline
                   .map((item, i) => {
-                    // Handle both old caption format and new tracking event format
-                    const timestamp = item.second ?? item.first_seen ?? 0;
-                    const displayText =
-                      item.caption ??
-                      `${item.event_type}: ${item.object_class} (Track ${item.track_id})`;
-                    return `
-                  <div class="flex gap-4 fade-in" style="animation-delay:${i * 30}ms">
-                    <div class="relative z-10 w-12 h-12 shrink-0 flex items-center justify-center">
-                      <div class="w-3 h-3 rounded-full bg-indigo-600 border-2 border-gray-950"></div>
-                    </div>
-                    <div class="flex-1 glass rounded-xl p-4 mb-0 cursor-pointer result-card" onclick="expandCaption(this)">
-                      <div class="flex items-center justify-between mb-2">
-                        <span class="text-xs font-mono text-indigo-300">${fmt(timestamp)}</span>
-                        <span class="text-xs text-gray-600">${timestamp.toFixed(1)}s</span>
-                      </div>
-                      <p class="text-xs text-gray-400 line-clamp-2 caption-preview">${displayText}</p>
-                      <p class="text-xs text-gray-300 hidden caption-full">${displayText}</p>
-                      ${
-                        item.keyframe_path || item.best_crop_path
-                          ? `
-                        <img src="/api/v1/${item.keyframe_path ? "keyframe" : "crop"}?path=${encodeURIComponent(item.keyframe_path || item.best_crop_path)}"
-                          class="mt-3 w-full max-w-xs h-32 object-cover rounded-lg bg-gray-800"
-                          onerror="this.style.display='none'" />
-                      `
-                          : ""
+                    const ts = item.second ?? item.first_seen ?? 0;
+                    const tsEnd = item.last_seen ?? ts;
+                    const dur = item.duration ?? 0;
+                    const cls = item.object_class ?? "";
+                    const dotCls = clsColor[cls] || "bg-gray-500";
+                    const conf = item.best_confidence
+                      ? Math.round(item.best_confidence * 100)
+                      : null;
+
+                    // Attribute pills from Phase 6B
+                    let attrHtml = "";
+                    if (item.attributes) {
+                      const a = item.attributes;
+                      const pills = [];
+                      if (cls === "person") {
+                        if (
+                          a.gender_estimate &&
+                          a.gender_estimate !== "unknown"
+                        )
+                          pills.push(a.gender_estimate);
+                        if (a.clothing_top && a.clothing_top !== "unknown")
+                          pills.push(a.clothing_top);
+                        if (
+                          a.clothing_bottom &&
+                          a.clothing_bottom !== "unknown"
+                        )
+                          pills.push(a.clothing_bottom);
+                        if (
+                          a.head_covering &&
+                          !["unknown", "none"].includes(a.head_covering)
+                        )
+                          pills.push(a.head_covering);
+                        if (
+                          a.carrying &&
+                          !["unknown", "none"].includes(a.carrying)
+                        )
+                          pills.push("carrying: " + a.carrying);
+                      } else {
+                        if (a.color && a.color !== "unknown")
+                          pills.push(a.color);
+                        if (a.type && a.type !== "unknown") pills.push(a.type);
+                        if (a.make_estimate && a.make_estimate !== "unknown")
+                          pills.push(a.make_estimate);
                       }
+                      if (pills.length)
+                        attrHtml =
+                          '<div class="flex gap-1 flex-wrap mt-1.5">' +
+                          pills
+                            .map(
+                              (p) =>
+                                `<span class="text-xs px-2 py-0.5 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-300">${p}</span>`,
+                            )
+                            .join("") +
+                          "</div>";
+                    }
+
+                    // Dwell badge
+                    const dwellBadge = item.has_dwell
+                      ? `<span class="text-xs px-1.5 py-0.5 rounded bg-yellow-500/15 border border-yellow-500/30 text-yellow-400">dwell</span>`
+                      : "";
+
+                    // Caption or tracking display
+                    const isCaption = !!item.caption;
+                    const mainText = isCaption
+                      ? item.caption
+                      : `${cls} appeared ${fmt(ts)} → ${fmt(tsEnd)}`;
+
+                    return `
+                  <div class="flex gap-4 fade-in" style="animation-delay:${i * 20}ms">
+                    <div class="relative z-10 w-12 shrink-0 flex flex-col items-center gap-1 pt-4">
+                      <div class="w-3 h-3 rounded-full ${dotCls} border-2 border-gray-950 shrink-0"></div>
+                      <span class="text-xs font-mono text-gray-500">${fmt(ts)}</span>
                     </div>
-                  </div>
-                `;
+                    <div class="flex-1 glass rounded-xl p-4 cursor-pointer result-card hover:border-gray-600 border border-transparent transition" onclick="toggleProof(this)">
+                      <div class="flex items-start gap-3">
+                        ${
+                          item.best_crop_path
+                            ? `<img src="/api/v1/crop?path=${encodeURIComponent(item.best_crop_path)}"
+                              class="w-20 h-16 object-cover rounded-lg shrink-0 bg-gray-800"
+                              onerror="this.style.display='none'" />`
+                            : item.keyframe_path
+                              ? `<img src="/api/v1/keyframe?path=${encodeURIComponent(item.keyframe_path)}"
+                                class="w-20 h-16 object-cover rounded-lg shrink-0 bg-gray-800"
+                                onerror="this.style.display='none'" />`
+                              : `<div class="w-20 h-16 bg-gray-800 rounded-lg shrink-0 flex items-center justify-center text-gray-600 text-xs">${cls || "?"}</div>`
+                        }
+                        <div class="flex-1 min-w-0">
+                          <div class="flex items-center gap-2 flex-wrap mb-1">
+                            <span class="text-xs font-semibold text-white capitalize">${cls} #${item.track_id ?? ""}</span>
+                            ${dwellBadge}
+                            ${conf !== null ? `<span class="text-xs text-gray-500">${conf}% conf</span>` : ""}
+                            ${dur > 0 ? `<span class="text-xs text-indigo-400 ml-auto">${dur.toFixed(0)}s</span>` : ""}
+                          </div>
+                          <div class="text-xs text-gray-500">
+                            ${fmt(ts)} → ${fmt(tsEnd)}
+                            ${isCaption ? `<span class="ml-2 text-gray-600">@ ${ts.toFixed(1)}s</span>` : ""}
+                          </div>
+                          ${attrHtml}
+                          <div class="proof-section hidden mt-2 p-2 rounded-lg bg-gray-900 border border-gray-800">
+                            <p class="text-xs text-gray-500 mb-1 font-medium">Details:</p>
+                            <p class="text-xs text-gray-400 leading-relaxed">${isCaption ? mainText : `Track #${item.track_id} · ${cls} · first seen ${ts.toFixed(1)}s · last seen ${tsEnd.toFixed(1)}s · ${dur.toFixed(1)}s duration`}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>`;
                   })
                   .join("")}
               </div>

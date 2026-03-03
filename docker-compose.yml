@@ -47,6 +47,7 @@ services:
       - ./app:/app/app
       - ./main.py:/app/main.py
       - ./data:/app/data
+      - ./config:/app/config
     working_dir: /app
     command: python main.py
 
@@ -67,6 +68,7 @@ services:
       - ./app:/app/app
       - ./data:/app/data
       - ./static:/app/static
+      - ./config:/app/config
     working_dir: /app
     ports:
       - "8000:8000"

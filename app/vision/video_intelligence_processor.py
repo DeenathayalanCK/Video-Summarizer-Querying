@@ -47,6 +47,8 @@ class VideoIntelligenceProcessor:
         self.event_generator = EventGenerator(
             dwell_threshold_seconds=self.settings.dwell_threshold_seconds,
             exit_gap_seconds=self.settings.exit_gap_seconds,
+            min_visible_frames=self.settings.min_visible_frames,
+            merge_gap_seconds=self.settings.merge_gap_seconds,
         )
         self.base_data_dir = self.settings.video_input_path.rstrip("/")
 
@@ -116,12 +118,10 @@ class VideoIntelligenceProcessor:
         try:
             # ── Duplicate prevention ──────────────────────────────────────────
             if repo.is_completed(video_file):
-                # Phase 6A done — run 6B (attributes) if not yet extracted AND enabled.
-                if (
-                    self.settings.enable_phase_6b
-                    and not repo.has_6b_completed(video_file)
-                    and repo.has_detection_data(video_file)
-                ):
+                # Phase 6A done — but run 6B (attributes) if not yet extracted.
+                # has_6b_completed is False on all existing videos (column defaults False).
+                # This lets us extract attributes without re-running YOLO.
+                if not repo.has_6b_completed(video_file) and repo.has_detection_data(video_file):
                     self.logger.info(
                         "video_6a_complete_running_6b_attributes", video=video_file,
                     )
@@ -280,9 +280,7 @@ class VideoIntelligenceProcessor:
             # Runs after all track events are saved.
             # Calls minicpm-v on the best crop per unique track_id.
             # Upgrades rag_text with color/type/clothing attributes and re-embeds.
-            # Gated by ENABLE_PHASE_6B=true in .env (default: true).
-            # Can always be triggered manually via POST /extract-attributes/{video}.
-            if not self._shutdown_requested and track_states and self.settings.enable_phase_6b:
+            if not self._shutdown_requested and track_states:
                 self.logger.info("attribute_extraction_starting", video=video_file)
                 try:
                     attr_processor = AttributeProcessor(db)

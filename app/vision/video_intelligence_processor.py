@@ -128,8 +128,15 @@ class VideoIntelligenceProcessor:
                     self._run_6b_only(video_file, db, repo)
                 else:
                     self.logger.info("video_already_completed_skipping", video=video_file)
-                    repo.mark_skipped(video_file, self.settings.camera_id)
                 return
+
+            # If a prior run partially saved rows (e.g. failed/recovered), clear and retry cleanly.
+            if repo.has_detection_data(video_file) or repo.has_track_event_data(video_file):
+                self.logger.warning(
+                    "video_reprocess_clearing_existing_phase_6a_data",
+                    video=video_file,
+                )
+                repo.clear_detection_data(video_file)
 
             # ── Reset tracker state from any previous video ───────────────────
             self.detector.reset_tracker()
@@ -405,3 +412,4 @@ class VideoIntelligenceProcessor:
                 action="skipping_frame_continuing",
             )
             return None
+

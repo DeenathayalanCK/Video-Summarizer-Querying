@@ -54,6 +54,7 @@ class VehicleAttributes:
 @dataclass
 class PersonAttributes:
     gender_estimate: str = "unknown"
+    age_estimate: str = "unknown"    # "child"|"teenager"|"young adult"|"adult"|"senior"
     clothing_top: str = "unknown"
     clothing_bottom: str = "unknown"
     head_covering: str = "unknown"
@@ -63,6 +64,7 @@ class PersonAttributes:
     def to_dict(self) -> dict:
         return {
             "gender_estimate": self.gender_estimate,
+            "age_estimate": self.age_estimate,
             "clothing_top": self.clothing_top,
             "clothing_bottom": self.clothing_bottom,
             "head_covering": self.head_covering,
@@ -265,6 +267,7 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
 
         attrs = PersonAttributes(
             gender_estimate=str(data.get("gender_estimate", "unknown")).lower().strip(),
+            age_estimate=str(data.get("age_estimate", "unknown")).lower().strip(),
             clothing_top=str(data.get("clothing_top", "unknown")).lower().strip(),
             clothing_bottom=str(data.get("clothing_bottom", "unknown")).lower().strip(),
             head_covering=str(data.get("head_covering", "unknown")).lower().strip(),

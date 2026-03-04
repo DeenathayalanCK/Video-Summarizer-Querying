@@ -104,11 +104,13 @@ class VideoSummarizer:
                 return "  None"
             lines = []
             for e in events:
-                # Include Phase 6B attributes if available
                 attr_str = ""
+                temporal_str = ""
                 if e.attributes:
                     attrs = e.attributes
                     cls = attrs.get("object_class", e.object_class)
+
+                    # Phase 6B appearance attributes
                     if cls in ("car", "truck", "bus", "motorcycle", "bicycle"):
                         color = attrs.get("color", "")
                         vtype = attrs.get("type", "")
@@ -119,17 +121,32 @@ class VideoSummarizer:
                         if parts:
                             attr_str = f" [{' '.join(parts)}]"
                     elif cls == "person":
-                        gender = attrs.get("gender_estimate", "")
-                        top = attrs.get("clothing_top", "")
-                        bottom = attrs.get("clothing_bottom", "")
-                        parts = [p for p in [gender, top, bottom] if p and p not in ("unknown", "none")]
+                        gender   = attrs.get("gender_estimate", "")
+                        age      = attrs.get("age_estimate", "")
+                        top      = attrs.get("clothing_top", "")
+                        bottom   = attrs.get("clothing_bottom", "")
+                        vis      = attrs.get("visible_text", "")
+                        parts = [p for p in [gender, age, top, bottom]
+                                 if p and p not in ("unknown", "none")]
+                        if vis and vis not in ("none", "unknown"):
+                            parts.append(f'"{vis}"')
                         if parts:
                             attr_str = f" [{', '.join(parts)}]"
+
+                    # Phase 7A temporal behaviour
+                    temporal = attrs.get("temporal")
+                    if temporal:
+                        beh   = temporal.get("behaviour", "")
+                        notes = temporal.get("notes", "")
+                        if beh:
+                            temporal_str = f" → BEHAVIOUR: {beh.upper()}"
+                            if notes:
+                                temporal_str += f" ({notes})"
 
                 lines.append(
                     f"  [{e.first_seen_second:.1f}s-{e.last_seen_second:.1f}s] "
                     f"{e.object_class.upper()} track #{e.track_id}{attr_str} "
-                    f"({e.duration_seconds:.1f}s)"
+                    f"({e.duration_seconds:.1f}s){temporal_str}"
                 )
             return "\n".join(lines)
 

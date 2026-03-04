@@ -588,6 +588,63 @@ def get_track_attributes(
     }
 
 
+@router.get("/temporal/{video_filename}")
+def get_temporal_analysis(
+    video_filename: str,
+    object_class: str = Query(None, description="Filter by class: person, car, etc."),
+    db: Session = Depends(get_db),
+):
+    """
+    Return temporal behaviour analysis for all tracks in a video.
+    Data is read from TrackEvent.attributes["temporal"] — written by TemporalAnalyzer
+    during the pipeline run. If temporal data is missing (old video), returns empty list
+    with a note to re-run the pipeline.
+    """
+    from app.storage.models import TrackEvent
+
+    q = (
+        db.query(TrackEvent)
+        .filter(
+            TrackEvent.video_filename == video_filename,
+            TrackEvent.event_type == "entry",   # one row per physical track
+        )
+    )
+    if object_class:
+        q = q.filter(TrackEvent.object_class == object_class)
+    events = q.order_by(TrackEvent.first_seen_second).all()
+
+    results = []
+    has_temporal = False
+    for ev in events:
+        attrs = ev.attributes or {}
+        temporal = attrs.get("temporal")
+        if temporal:
+            has_temporal = True
+        row = {
+            "track_id": ev.track_id,
+            "object_class": ev.object_class,
+            "first_seen": ev.first_seen_second,
+            "last_seen": ev.last_seen_second,
+            "duration_seconds": ev.duration_seconds,
+            "best_confidence": ev.best_confidence,
+            "best_crop_path": ev.best_crop_path,
+            "attributes": attrs,
+            "temporal": temporal,
+        }
+        results.append(row)
+
+    return {
+        "video_filename": video_filename,
+        "count": len(results),
+        "has_temporal_data": has_temporal,
+        "tracks": results,
+        "note": (
+            None if has_temporal
+            else "No temporal analysis data. Re-run the pipeline to generate it."
+        ),
+    }
+
+
 @router.post("/index")
 def trigger_reindex(db: Session = Depends(get_db)):
     count = CaptionIndexer(db).index_all_unindexed()

@@ -11,6 +11,7 @@ from app.detection.crop_utils import (
     extract_crop, save_crop, normalize_bbox, get_frame_quadrant,
 )
 from app.detection.event_generator import EventGenerator, TrackState, build_detection_rag_text
+from app.detection.temporal_analyzer import TemporalAnalyzer
 from app.detection.object_indexer import ObjectIndexer
 from app.detection.attribute_processor import AttributeProcessor
 from app.storage.database import SessionLocal
@@ -285,6 +286,55 @@ class VideoIntelligenceProcessor:
                     video=video_file,
                     count=len(generated_events),
                 )
+
+            # ── Phase 7A: Temporal behaviour analysis ─────────────────────────
+            # Runs after track events are saved to DB.
+            # Classifies each track's behaviour (loitering, patrolling, etc.)
+            # and writes the result into TrackEvent.attributes["temporal"].
+            if not self._shutdown_requested and track_states:
+                self.logger.info("temporal_analysis_starting", video=video_file)
+                try:
+                    from app.storage.models import TrackEvent, DetectedObject
+
+                    # Load detected objects grouped by track_id for quadrant analysis
+                    all_det_objs = (
+                        db.query(DetectedObject)
+                        .filter(DetectedObject.video_filename == video_file)
+                        .all()
+                    )
+                    det_by_track: dict = {}
+                    for d in all_det_objs:
+                        if d.track_id is not None:
+                            det_by_track.setdefault(d.track_id, []).append(d)
+
+                    analyzer = TemporalAnalyzer()
+                    behaviours = analyzer.analyze(track_states, det_by_track)
+
+                    # Merge temporal result into each TrackEvent.attributes
+                    behaviour_by_tid = {b.track_id: b for b in behaviours}
+                    all_track_events = (
+                        db.query(TrackEvent)
+                        .filter(TrackEvent.video_filename == video_file)
+                        .all()
+                    )
+                    for ev in all_track_events:
+                        beh = behaviour_by_tid.get(ev.track_id)
+                        if beh:
+                            attrs = dict(ev.attributes or {})
+                            attrs["temporal"] = beh.to_dict()
+                            ev.attributes = attrs
+                    db.commit()
+                    self.logger.info(
+                        "temporal_analysis_complete",
+                        video=video_file,
+                        tracks=len(behaviours),
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        "temporal_analysis_failed",
+                        video=video_file,
+                        error=str(e),
+                    )
 
             # ── Phase 6B: Attribute extraction ───────────────────────────────
             # Runs after all track events are saved.

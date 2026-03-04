@@ -38,10 +38,11 @@ JSON fields:
 - "clothing_bottom": color and type of lower body clothing (e.g. "blue jeans", "dark trousers", "unknown")
 - "head_covering": any hat, helmet, hood, or "none" or "unknown"
 - "carrying": any visible bags, backpacks, objects or "none" or "unknown"
+- "age_estimate": approximate age bracket — choose one: "child" (under 13), "teenager" (13-18), "young adult" (18-30), "adult" (30-55), "senior" (55+), or "unknown". Base on body size, posture, and hair if visible. Do NOT base on face alone.
 - "visible_text": any readable text ON clothing, badges, vests, hats (e.g. "SECURITY", "POLICE", "STAFF", a name or number). Use "none" if no text is visible.
 
 Example output:
-{"gender_estimate": "male", "clothing_top": "white shirt", "clothing_bottom": "dark trousers", "head_covering": "none", "carrying": "none", "visible_text": "SECURITY"}
+{"gender_estimate": "male", "age_estimate": "adult", "clothing_top": "white shirt", "clothing_bottom": "dark trousers", "head_covering": "none", "carrying": "none", "visible_text": "SECURITY"}
 
 Now analyze the person in this image:"""
 
@@ -96,6 +97,7 @@ def build_person_rag_text(
     duration: float,
     confidence: float,
     gender_estimate: str = "unknown",
+    age_estimate: str = "unknown",
     clothing_top: str = "unknown",
     clothing_bottom: str = "unknown",
     head_covering: str = "unknown",
@@ -117,6 +119,8 @@ def build_person_rag_text(
         appearance_parts.append(gender_estimate)
     else:
         appearance_parts.append("person")
+    if age_estimate and age_estimate != "unknown":
+        appearance_parts.append(age_estimate)
 
     clothing_parts = []
     if clothing_top and clothing_top != "unknown":

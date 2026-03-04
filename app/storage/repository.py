@@ -70,6 +70,10 @@ class EventRepository:
 
     def mark_running(self, video_filename: str, camera_id: str,
                      total_frames: Optional[int] = None) -> ProcessingStatus:
+        # NOTE: Do NOT reset phase_6b_completed here.
+        # If the video is being re-run (e.g. after a crash), 6B may have already
+        # finished on a prior pass. clear_detection_data() handles the full reset
+        # before mark_running is called, so 6B state is already cleared there.
         return self.upsert_status(
             video_filename, camera_id,
             status="running",
@@ -77,8 +81,6 @@ class EventRepository:
             total_frames_sampled=total_frames,
             scenes_detected=0,
             scenes_captioned=0,
-            phase_6b_completed=False,
-            phase_6b_tracks_attributed=None,
             last_error=None,
         )
 
@@ -290,6 +292,23 @@ class EventRepository:
         row = self.get_status(video_filename)
         return row is not None and bool(row.phase_6b_completed)
 
+    def reset_for_rerun(self, video_filename: str, camera_id: str) -> None:
+        """
+        Full reset before re-running a failed/crashed video.
+        Clears all detection data, embeddings, summary AND resets 6B state.
+        Call this before mark_running on a retry so everything starts clean.
+        """
+        self.clear_detection_data(video_filename)
+        self.upsert_status(
+            video_filename, camera_id,
+            status="pending",
+            phase_6b_completed=False,
+            phase_6b_tracks_attributed=None,
+            last_error=None,
+            scenes_detected=0,
+            scenes_captioned=0,
+        )
+
     def has_detection_data(self, video_filename: str) -> bool:
         """Check if Phase 6A detection data exists for this video."""
         return (
@@ -308,17 +327,38 @@ class EventRepository:
 
     def clear_detection_data(self, video_filename: str) -> None:
         """
-        Remove all Phase 6A rows for a video.
-        Used to make failed/retried processing idempotent.
+        Remove ALL Phase 6A/6B rows for a video so a retry starts completely clean.
+        Order matters — delete child rows (embeddings) before parents (objects/events),
+        otherwise FK constraints will fire.
+        Also clears VideoSummary so the summary regenerates from fresh data.
         """
-        (
-            self.db.query(DetectedObject)
+        from app.storage.models import (
+            DetectedObjectEmbedding, TrackEventEmbedding, VideoSummary,
+        )
+        # 1. Embeddings first (child rows)
+        obj_ids = [
+            r.id for r in
+            self.db.query(DetectedObject.id)
             .filter(DetectedObject.video_filename == video_filename)
-            .delete(synchronize_session=False)
-        )
-        (
-            self.db.query(TrackEvent)
+            .all()
+        ]
+        if obj_ids:
+            self.db.query(DetectedObjectEmbedding)                .filter(DetectedObjectEmbedding.object_id.in_(obj_ids))                .delete(synchronize_session=False)
+
+        ev_ids = [
+            r.id for r in
+            self.db.query(TrackEvent.id)
             .filter(TrackEvent.video_filename == video_filename)
-            .delete(synchronize_session=False)
-        )
+            .all()
+        ]
+        if ev_ids:
+            self.db.query(TrackEventEmbedding)                .filter(TrackEventEmbedding.track_event_id.in_(ev_ids))                .delete(synchronize_session=False)
+
+        # 2. Parent detection rows
+        self.db.query(DetectedObject)            .filter(DetectedObject.video_filename == video_filename)            .delete(synchronize_session=False)
+        self.db.query(TrackEvent)            .filter(TrackEvent.video_filename == video_filename)            .delete(synchronize_session=False)
+
+        # 3. Summary (needs to regenerate from fresh detections)
+        self.db.query(VideoSummary)            .filter(VideoSummary.video_filename == video_filename)            .delete(synchronize_session=False)
+
         self.db.commit()

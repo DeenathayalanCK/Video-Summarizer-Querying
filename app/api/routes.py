@@ -804,6 +804,89 @@ def run_temporal_analysis(video_filename: str, db: Session = Depends(get_db)):
         "message": "Temporal analysis complete. Refresh the Temporal tab.",
     }
 
+
+
+# ── Semantic Memory Graph ──────────────────────────────────────────────────────
+
+@router.get("/memory-graph/{video_filename}")
+def get_memory_graph(
+    video_filename: str,
+    node_type: Optional[str] = Query(None, description="Filter: identity, behaviour, motion, scene, relationship, timeline"),
+    db: Session = Depends(get_db),
+):
+    """Return all semantic memory graph nodes for a video."""
+    from app.storage.models import SemanticMemoryGraph
+
+    q = db.query(SemanticMemoryGraph).filter(
+        SemanticMemoryGraph.video_filename == video_filename)
+    if node_type:
+        q = q.filter(SemanticMemoryGraph.node_type == node_type)
+    nodes = q.order_by(SemanticMemoryGraph.start_second).all()
+
+    return {
+        "video_filename": video_filename,
+        "count": len(nodes),
+        "nodes": [
+            {
+                "id": str(n.id),
+                "node_type": n.node_type,
+                "node_label": n.node_label,
+                "semantic_text": n.semantic_text,
+                "track_id": n.track_id,
+                "start_second": n.start_second,
+                "end_second": n.end_second,
+                "confidence": n.confidence,
+                "metadata": n.node_meta,
+            }
+            for n in nodes
+        ],
+    }
+
+
+@router.post("/build-memory-graph/{video_filename}")
+def build_memory_graph(video_filename: str, db: Session = Depends(get_db)):
+    """
+    Manually build the Semantic Memory Graph for a video.
+    Use for videos processed before memory graph was added.
+    First builds timeline if missing, then builds graph.
+    """
+    from app.storage.memory_graph import MemoryGraphBuilder
+    from app.detection.timeline_builder import TimelineBuilder
+    from app.storage.repository import EventRepository
+    from app.core.config import get_settings
+
+    repo = EventRepository(db)
+    if not repo.has_track_event_data(video_filename):
+        raise HTTPException(status_code=404, detail="No track event data found.")
+
+    camera_id = get_settings().camera_id
+
+    # Ensure timeline exists first (memory graph depends on it for scene events)
+    from app.storage.models import VideoTimeline
+    if not db.query(VideoTimeline).filter(
+            VideoTimeline.video_filename == video_filename).first():
+        try:
+            TimelineBuilder(db).build(video_filename, camera_id)
+        except Exception as e:
+            logger.warning("timeline_build_failed_during_memory", error=str(e))
+
+    try:
+        nodes = MemoryGraphBuilder(db).build(video_filename, camera_id)
+        if not nodes:
+            raise HTTPException(status_code=500, detail="No nodes produced.")
+        from collections import Counter
+        type_counts = Counter(n.node_type for n in nodes)
+        return {
+            "video_filename": video_filename,
+            "total_nodes": len(nodes),
+            "by_type": dict(type_counts),
+            "message": "Memory graph built successfully.",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/index")
 def trigger_reindex(db: Session = Depends(get_db)):
     count = CaptionIndexer(db).index_all_unindexed()

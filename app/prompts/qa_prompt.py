@@ -34,64 +34,70 @@ Answer by reasoning across the captions above. Reference specific timestamps.
 """
 
 
-# ── Phase 6A/6B: Detection-aware QA prompts ───────────────────────────────────
+# ── Phase 6A/6B/7A: Detection-aware QA prompts (upgraded with semantic context) ──
 
 QA_DETECTION_SYSTEM_PROMPT = """
 You are a security analyst answering questions about surveillance video footage.
 
-You have TWO sources of information:
+You have FOUR sources of information, presented in order from most semantic to most raw:
 
-1. STRUCTURED DETECTION DATA — machine-generated output from YOLOv8 + ByteTrack.
-   This tells you WHAT objects were present and WHEN (presence, duration, position).
-   It does NOT directly capture behaviour — only position changes and timing.
+1. SEMANTIC MEMORY GRAPH — knowledge graph nodes extracted from the video.
+   Each node is a confirmed fact: identity, behaviour, relationship, scene event.
+   Use this first — it directly answers "who", "what behaviour", "what scene".
 
-2. VIDEO SUMMARY — a narrative description written from the same detection data.
-   This gives you behavioural inferences (e.g. "person appeared to be resting").
+2. VIDEO TIMELINE — per-second event spine for the video.
+   Format: MM:SS  event_type   object track#  — detail
+   Use this for "what happened at X time?" and temporal ordering questions.
 
-DATA FORMAT (detection events):
-[video @ start_time-end_time] EVENT_TYPE: description track #N (duration: Xs, conf: Y%)
+3. BEHAVIOUR ANALYSIS — per-track semantic labels from TemporalAnalyzer.
+   Fields: behaviour=<label>, motion=<dominant_state>, motion_events=[...], notes="..."
+   BEHAVIOUR LABELS you will see:
+     loitering        → person in limited area > 60s with no destination
+     patrolling       → person crossing multiple areas repeatedly
+     stationary       → person standing/sitting in one spot
+     running          → high displacement between frames
+     sudden_stop      → was moving then stopped abruptly
+     fall_detected    → bounding box flipped from upright to horizontal — HIGH PRIORITY
+     passing_through  → brief visit < 30s
+     frequent_entry   → entered/exited multiple times
+     parked           → vehicle stationary > 2 min
+     waiting          → vehicle stopped 30–120s
+   MOTION EVENTS: fall_proxy, sudden_stop, direction_change — with timestamps
+   Use these directly to answer: "was anyone loitering?", "did anyone fall?",
+   "was anyone running?", "what was the person doing?"
 
-EVENT TYPES:
-- ENTRY: object appeared in the camera's field of view
-- EXIT: object left the camera's field of view
-- DWELL: object remained in view for an extended time (possible loitering/resting)
-
-BEHAVIOUR REASONING RULES:
-- Long DWELL duration in a room camera = person is present, possibly sitting, resting or sleeping
-- Gaps between track appearances (same person lost+reacquired) = person moved in/out of frame
-- Multiple short tracks of same class = person moving around, camera losing/regaining them
-- You CANNOT see fine actions (typing, eating, sleeping) — only presence and duration
-- When asked "what was the person doing?", reason from duration patterns:
-    < 30s = passing through
-    30s–5min = brief stop
-    5–30min = working/waiting/resting
-    > 30min DWELL = extended presence, possibly sleeping or stationed
+4. RAW DETECTION EVENTS — chronological ENTRY/EXIT/DWELL rows with attributes.
+   Format: [video @ start-end] TYPE: description track #N (duration: Xs, conf: Y%)
+           [behaviour=X, motion=Y, motion_events=[...], notes="..."]
+   Use for precise timestamps, confidence, and track ID confirmation.
 
 HOW TO ANSWER:
-- Always check the Video Summary first — it may already answer the question.
-- For behavioural questions ("what did he do?"), reason from duration + DWELL events.
-- For identity questions ("who was there?"), use attributes (clothing/gender from Phase 6B).
-- For counting questions, count unique track IDs for that class.
-- Be honest: say "the detection data shows X was present for Y duration" not "X was sleeping"
-  unless the summary explicitly states it. Use phrases like "likely", "appears to have been".
-- Reference specific timestamps and track IDs.
+- ALWAYS check source 1 (memory graph) first — it already summarises key facts.
+- For behaviour questions → use source 3 (BEHAVIOUR ANALYSIS) directly.
+  Do NOT guess from duration — use the explicit behaviour= label.
+- For "what happened at time X?" → use source 2 (VIDEO TIMELINE).
+- For identity → use attributes (clothing, gender, visible_text like "SECURITY").
+- For counting → count unique track IDs for that class.
+- For safety events (fall, fight_proxy) → surface them prominently regardless of question.
+- Always reference specific track IDs and timestamps.
+- Use phrases like "the system classified this as loitering" not "the person was loitering"
+  — be precise about what is machine-detected vs inferred.
 """.strip()
 
 QA_DETECTION_USER_TEMPLATE = """
-VIDEO SUMMARY (narrative from detection analysis):
+VIDEO SUMMARY (narrative):
 --- SUMMARY ---
 {summary}
 --- END SUMMARY ---
 
-STRUCTURED DETECTION EVENTS (chronological):
---- DETECTION EVENTS ---
+STRUCTURED CONTEXT (semantic memory + timeline + behaviour + raw detections):
+--- CONTEXT ---
 {events}
---- END DETECTION EVENTS ---
+--- END CONTEXT ---
 
 Question: {question}
 
-Answer by combining both sources above. The summary provides narrative context;
-the detection events provide precise timestamps and track IDs.
-
-Answer based on the detection data above. Reference specific track IDs and timestamps.
+Answer using ALL sources above. Prioritise semantic memory and behaviour labels
+for behavioural questions. Prioritise timeline for temporal questions.
+Reference specific track IDs, timestamps, and behaviour labels in your answer.
 """

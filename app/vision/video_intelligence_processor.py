@@ -49,6 +49,7 @@ from app.storage.database import SessionLocal
 from app.storage.repository import EventRepository
 from app.rag.summarizer import VideoSummarizer
 from app.detection.timeline_builder import TimelineBuilder
+from app.storage.memory_graph import MemoryGraphBuilder
 
 # Max time to wait for the Phase 6B worker thread before giving up
 _6B_TIMEOUT_S = 3600   # 1 hour — minicpm-v on CPU is slow
@@ -335,6 +336,14 @@ class VideoIntelligenceProcessor:
                     self.logger.info("timeline_built", video=video_file)
                 except Exception as e:
                     self.logger.warning("timeline_build_failed", video=video_file, error=str(e))
+
+                # Build semantic memory graph (Layer 1 QA context)
+                self.logger.info("memory_graph_starting", video=video_file)
+                try:
+                    MemoryGraphBuilder(db).build(video_file, self.settings.camera_id)
+                    self.logger.info("memory_graph_built", video=video_file)
+                except Exception as e:
+                    self.logger.warning("memory_graph_failed", video=video_file, error=str(e))
 
                 # Wait for 6B before completing
                 worker.join(timeout=_6B_TIMEOUT_S)

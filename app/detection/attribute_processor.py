@@ -184,7 +184,12 @@ class AttributeProcessor:
             # ── Write attributes to all TrackEvents for this track_id ──────────
             track_events_for_this_track = all_events_by_track.get(track_id, [])
             for ev in track_events_for_this_track:
-                ev.attributes = attributes_dict
+                # Merge into existing attributes so that keys written by earlier
+                # pipeline phases (e.g. "temporal" from TemporalAnalyzer) are
+                # preserved instead of being wiped out.
+                merged = dict(ev.attributes or {})
+                merged.update(attributes_dict)
+                ev.attributes = merged
 
                 # Build event-type-specific rag_text for exit/dwell
                 if ev.event_type != "entry" and object_class in VEHICLE_CLASSES and vehicle_attrs:

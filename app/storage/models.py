@@ -318,3 +318,43 @@ class VideoTimeline(Base):
 
 
 Index("idx_video_timelines_video", VideoTimeline.video_filename)
+
+
+# ── SemanticMemoryGraph: knowledge graph nodes per video ──────────────────────
+
+class SemanticMemoryGraph(Base):
+    """
+    One row per knowledge-graph node for a video.
+
+    Node types and what they represent:
+      identity     — who/what: "Person #3, male, white shirt, SECURITY badge"
+      behaviour    — what they did: "Person #3 was loitering 00:12–01:04"
+      motion       — how they moved: "Person #3 running, sudden_stop @ 00:45"
+      scene        — scene-level event: "crowd_gathering 00:05–00:45"
+      relationship — co-presence: "Person #3 and Car #1 together 00:05–00:07"
+      timeline     — point event: "FALL ALERT Person #3 @ 00:32"
+
+    The QA engine reads these nodes as Layer 1 context — the most pre-digested,
+    human-readable knowledge available about the video.
+    """
+    __tablename__ = "semantic_memory_graph"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    video_filename = Column(String, nullable=False, index=True)
+    camera_id = Column(String, nullable=False)
+
+    node_type    = Column(String(30), nullable=False, index=True)
+    node_label   = Column(String(200), nullable=False)
+    semantic_text = Column(Text, nullable=False)
+
+    track_id      = Column(Integer, nullable=True, index=True)
+    start_second  = Column(Float, nullable=False, default=0.0)
+    end_second    = Column(Float, nullable=False, default=0.0)
+    confidence    = Column(Float, nullable=False, default=0.5)
+    node_meta     = Column(JSONB, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+Index("idx_smg_video_type", SemanticMemoryGraph.video_filename, SemanticMemoryGraph.node_type)
+Index("idx_smg_video_track", SemanticMemoryGraph.video_filename, SemanticMemoryGraph.track_id)

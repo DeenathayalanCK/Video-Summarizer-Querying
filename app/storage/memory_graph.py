@@ -112,6 +112,27 @@ class MemoryGraphBuilder:
                 metadata={"object_class": obj, "attributes": id_parts},
             ))
 
+            # ── Plate number node (vehicles only) ────────────────────────────
+            if not (obj in ("car","truck","bus","motorcycle","bicycle")):
+                pass  # handled below
+            else:
+                plate_num = attrs.get("plate_number", "unknown")
+                if plate_num and plate_num not in ("unknown", ""):
+                    nodes.append(MemoryNode(
+                        node_type="identity",
+                        node_label=f"{id_label} plate={plate_num}",
+                        semantic_text=(
+                            f"LICENSE PLATE DETECTED — {id_label} has plate number: {plate_num}. "
+                            f"Vehicle first seen {self._fmt(t_in)}, last seen {self._fmt(t_out)}. "
+                            f"This plate was read by the vision model from the best crop."
+                        ),
+                        track_id=tid,
+                        start_second=t_in,
+                        end_second=t_out,
+                        confidence=0.75,  # OCR from low-res crop — moderate confidence
+                        metadata={"plate_number": plate_num, "object_class": obj},
+                    ))
+
             # ── Behaviour node ────────────────────────────────────────────────
             behaviour = temp.get("behaviour", "")
             if behaviour and behaviour != "unknown":
@@ -316,4 +337,7 @@ class MemoryGraphBuilder:
                 v = attrs.get(k, "")
                 if v and v not in ("unknown","none",""):
                     parts.append(v)
+            plate = attrs.get("plate_number", "")
+            if plate and plate not in ("unknown",""):
+                parts.append(f"plate:{plate}")
         return parts if parts else [obj]

@@ -781,7 +781,7 @@ def run_temporal_analysis(video_filename: str, db: Session = Depends(get_db)):
 
     # Run TemporalAnalyzer
     analyser = TemporalAnalyzer()
-    behaviours = analyser.analyse(track_states, det_by_track)
+    behaviours = analyser.analyze(track_states, det_by_track)
     beh_map = {b.track_id: b for b in behaviours}
 
     # Write results back into all TrackEvent rows for this video

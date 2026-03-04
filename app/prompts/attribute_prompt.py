@@ -26,6 +26,32 @@ Example output:
 Now analyze the vehicle in this image:"""
 
 
+
+# ── License plate OCR ─────────────────────────────────────────────────────────
+
+PLATE_OCR_PROMPT = """You are reading a license plate from a security camera image of a vehicle.
+
+Your ONLY job is to read the license plate number/text exactly as it appears.
+
+Rules:
+- Look carefully at the plate area — it may be partially visible or at an angle
+- Read characters left-to-right exactly as printed
+- Include letters, numbers, spaces, and hyphens as they appear
+- Do NOT guess or invent characters you cannot read clearly
+- If the plate is too blurry, occluded, or unreadable, output: {"plate_number": "unknown"}
+
+Respond ONLY with a valid JSON object. No explanation, no preamble.
+
+JSON field:
+- "plate_number": the exact plate text (e.g. "TN 09 AB 1234", "KA-01-MF-7890", "unknown")
+
+Examples:
+{"plate_number": "TN 09 AB 1234"}
+{"plate_number": "KA 01 MF 7890"}
+{"plate_number": "unknown"}
+
+Now read the license plate in this image:"""
+
 # ── Person attribute extraction ────────────────────────────────────────────────
 
 PERSON_ATTRIBUTE_PROMPT = """You are analyzing a cropped image of a person from a security camera.
@@ -60,6 +86,7 @@ def build_vehicle_rag_text(
     color: str = "unknown",
     vehicle_type: str = "unknown",
     make_estimate: str = "unknown",
+    plate_number: str = "unknown",
 ) -> str:
     """
     Build enriched RAG text for a vehicle TrackEvent.
@@ -80,12 +107,13 @@ def build_vehicle_rag_text(
         parts.append(object_class)
 
     description = " ".join(parts) if parts else object_class
-    make_str = f", possibly {make_estimate}" if make_estimate and make_estimate != "unknown" else ""
+    make_str  = f", possibly {make_estimate}" if make_estimate and make_estimate != "unknown" else ""
+    plate_str = f" License plate: {plate_number}." if plate_number and plate_number not in ("unknown", "") else ""
 
     return (
         f"{description.capitalize()}{make_str} (track #{track_id}) {event_type} event: "
         f"appeared at {first_seen:.1f}s, last seen at {last_seen:.1f}s "
-        f"(duration: {duration:.1f}s). Detected with {confidence:.0%} confidence."
+        f"(duration: {duration:.1f}s). Detected with {confidence:.0%} confidence.{plate_str}"
     )
 
 

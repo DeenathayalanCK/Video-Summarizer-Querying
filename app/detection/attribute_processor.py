@@ -151,6 +151,7 @@ class AttributeProcessor:
                     color=vehicle_attrs.color,
                     vehicle_type=vehicle_attrs.vehicle_type,
                     make_estimate=vehicle_attrs.make_estimate,
+                    plate_number=vehicle_attrs.plate_number,
                 )
 
             elif object_class in PERSON_CLASSES:
@@ -184,12 +185,7 @@ class AttributeProcessor:
             # ── Write attributes to all TrackEvents for this track_id ──────────
             track_events_for_this_track = all_events_by_track.get(track_id, [])
             for ev in track_events_for_this_track:
-                # Merge into existing attributes so that keys written by earlier
-                # pipeline phases (e.g. "temporal" from TemporalAnalyzer) are
-                # preserved instead of being wiped out.
-                merged = dict(ev.attributes or {})
-                merged.update(attributes_dict)
-                ev.attributes = merged
+                ev.attributes = attributes_dict
 
                 # Build event-type-specific rag_text for exit/dwell
                 if ev.event_type != "entry" and object_class in VEHICLE_CLASSES and vehicle_attrs:
@@ -204,6 +200,7 @@ class AttributeProcessor:
                         color=vehicle_attrs.color,
                         vehicle_type=vehicle_attrs.vehicle_type,
                         make_estimate=vehicle_attrs.make_estimate,
+                        plate_number=vehicle_attrs.plate_number,
                     )
                 elif ev.event_type != "entry" and object_class in PERSON_CLASSES and person_attrs:
                     ev.rag_text = build_person_rag_text(

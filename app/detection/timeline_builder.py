@@ -88,6 +88,19 @@ class TimelineBuilder:
                 "crop_path":    crop,
             })
 
+            # ── Plate number event (vehicles only, when plate was OCR'd) ─────
+            plate_num = attrs.get("plate_number", "unknown")
+            if is_vehicle and plate_num and plate_num not in ("unknown", ""):
+                entries.append({
+                    "second":       round(t_in + 0.1, 1),   # just after entry
+                    "time_label":   _fmt(t_in),
+                    "event":        "plate_read",
+                    "track_id":     tid,
+                    "object_class": obj,
+                    "detail":       f"License plate identified: {plate_num}",
+                    "crop_path":    crop,
+                })
+
             # ── Motion-event mid-points (fall / sudden_stop / direction_change)
             # These are person-only signals — skip for vehicles
             if not is_vehicle:
@@ -237,6 +250,10 @@ class TimelineBuilder:
                 v = attrs.get(k, "")
                 if v and v not in ("unknown", "none", ""):
                     parts.append(v)
+            # Include plate number in entry detail if available
+            plate = attrs.get("plate_number", "unknown")
+            if plate and plate not in ("unknown", ""):
+                parts.append(f"[plate:{plate}]")
         desc = " ".join(parts) if parts else obj.capitalize()
         return f"{desc} enters scene at {_fmt(ev.first_seen_second)}."
 

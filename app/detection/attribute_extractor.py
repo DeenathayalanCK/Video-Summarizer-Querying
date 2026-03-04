@@ -33,6 +33,7 @@ class VehicleAttributes:
     vehicle_type: str = "unknown"
     make_estimate: str = "unknown"
     plate_visible: bool = False
+    plate_number: str = "unknown"  # OCR result — "unknown" if unreadable
 
     def to_dict(self) -> dict:
         return {
@@ -40,6 +41,7 @@ class VehicleAttributes:
             "type": self.vehicle_type,
             "make_estimate": self.make_estimate,
             "plate_visible": self.plate_visible,
+            "plate_number": self.plate_number,
         }
 
     @property
@@ -228,14 +230,51 @@ class VehicleAttributeExtractor(BaseAttributeExtractor):
             plate_visible=bool(data.get("plate_visible", False)),
         )
 
+        # ── Second call: OCR plate number if plate was detected ───────────────
+        if attrs.plate_visible:
+            plate_num = self._extract_plate_number(image_b64, crop_path)
+            attrs.plate_number = plate_num
+            self.logger.info(
+                "plate_ocr_done",
+                crop=crop_path,
+                plate_number=plate_num,
+            )
+
         self.logger.info(
             "vehicle_attribute_extraction_done",
             crop=crop_path,
             color=attrs.color,
             type=attrs.vehicle_type,
             make=attrs.make_estimate,
+            plate_visible=attrs.plate_visible,
+            plate_number=attrs.plate_number,
         )
         return attrs
+
+    def _extract_plate_number(self, image_b64: str, crop_path: str) -> str:
+        """
+        Dedicated second vision model call focused on reading the license plate.
+        Uses a tighter prompt with explicit OCR instructions.
+        Returns the plate number string, or "unknown" if unreadable.
+        """
+        from app.prompts.attribute_prompt import PLATE_OCR_PROMPT
+        raw = self._call_vision_model(image_b64, PLATE_OCR_PROMPT)
+        if not raw:
+            return "unknown"
+
+        data = self._extract_json(raw)
+        if not data:
+            # Model may return plain text instead of JSON — use it directly if short
+            raw_stripped = raw.strip()
+            if raw_stripped and len(raw_stripped) < 15 and raw_stripped.lower() != "unknown":
+                return raw_stripped.upper()
+            return "unknown"
+
+        plate = str(data.get("plate_number", "unknown")).strip().upper()
+        # Sanity check: plate numbers are typically 4–10 characters
+        if len(plate) < 2 or len(plate) > 12:
+            return "unknown"
+        return plate
 
 
 # ── Person extractor ───────────────────────────────────────────────────────────

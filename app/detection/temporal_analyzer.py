@@ -1,62 +1,58 @@
 """
 temporal_analyzer.py — Phase 7A: Temporal behaviour analysis.
 
-Runs after EventGenerator has produced TrackEvents for a video.
-Analyses the track_states (accumulated during the frame loop) to produce
-rich behavioural inferences for persons and vehicles:
+Upgraded in this version to consume motion_summary from EventGenerator
 
-PERSON behaviours:
-  - stationary     : present continuously, position changes < threshold
-  - loitering      : dwell present in a single area, no clear destination
-  - patrolling     : repeated appearances across different frame quadrants
-  - passing_through: short visit (< 30s), single appearance
-  - frequent_entry : enters/exits the scene multiple times
+  fall_detected   ← fall_proxy event from bbox AR change
+  running         ← dominant_state == "running"
+  sudden_stop     ← sudden_stop event in motion_events
+  ... plus all original duration/quadrant-based classes
 
-VEHICLE behaviours:
-  - parked         : present for > 2 min with minimal movement
-  - passing        : short visit < 30s, entered and exited quickly
-  - waiting        : stopped briefly (30s–2min), then left
-  - repeated_visit : appears more than once with a gap
+Priority order (highest wins):
+  1. fall_detected  (safety-critical — always surfaced first)
+  2. running
+  3. sudden_stop
+  4. patrolling     (appearances-based)
+  5. frequent_entry
+  6. Duration-based: passing_through / active / stopped / loitering / stationary
 
-The output is stored as a new TemporalAnalysis JSON blob per track
-in the TrackEvent.attributes["temporal"] field, and used by:
-  - The video summarizer (richer narrative)
-  - The Q&A engine (answers "what was the person doing?")
-  - The new Timeline/Temporal tab in the UI
+Stored in TrackEvent.attributes["temporal"] as a flat JSON dict.
 """
 
-from dataclasses import dataclass, asdict, field
-from typing import Optional
-
+from dataclasses import dataclass, asdict
 from app.core.logging import get_logger
-from app.detection.event_generator import TrackState
+from app.detection.event_generator import TrackState, EventGenerator
 
 
-# ── Behaviour classification thresholds ───────────────────────────────────────
-
-PASSING_THROUGH_MAX_S   = 30.0   # present < 30s = passing through
-WAITING_MAX_S           = 120.0  # 30–120s = waiting / brief stop
-PARKED_MIN_S            = 120.0  # > 2 min vehicle = parked
-LOITERING_MIN_S         = 60.0   # person in one area > 1 min = loitering
-PATROL_MIN_APPEARANCES  = 3      # appears 3+ separate times = patrolling
-FREQUENT_ENTRY_MIN      = 2      # enters more than N times = frequent entry
+# ── Duration thresholds ───────────────────────────────────────────────────────
+PASSING_MAX   = 30.0    # < 30s  → passing_through
+LOITERING_MIN = 60.0    # > 60s in limited area → loitering
+PARKED_MIN    = 120.0   # > 2min vehicle → parked
+PATROL_MIN_N  = 3       # 3+ separate appearances → patrolling
+FREQUENT_MIN  = 2       # > 2 entries → frequent_entry
 
 
 @dataclass
 class TemporalBehaviour:
-    """Behavioural classification for one tracked object."""
     track_id: int
     object_class: str
-    behaviour: str              # primary label (see module docstring)
+    behaviour: str
     duration_seconds: float
     first_seen: float
     last_seen: float
-    appearance_count: int       # how many separate appearances / gaps
-    avg_gap_seconds: float      # mean gap between appearances (0 if one block)
-    quadrants_visited: list     # frame quadrants seen in
-    movement_pattern: str       # "stationary" | "moving" | "mixed"
-    confidence: float           # detection confidence
-    notes: str                  # human-readable explanation
+    appearance_count: int
+    avg_gap_seconds: float
+    quadrants_visited: list
+    movement_pattern: str
+    confidence: float
+    notes: str
+    # New: motion detail from Bug 2
+    dominant_motion: str = "unknown"
+    motion_events: list = None
+
+    def __post_init__(self):
+        if self.motion_events is None:
+            self.motion_events = []
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -64,72 +60,68 @@ class TemporalBehaviour:
 
 class TemporalAnalyzer:
     """
-    Analyses accumulated TrackState data to classify object behaviour.
-
-    Called by VideoIntelligenceProcessor after EventGenerator.generate()
-    and before VideoSummarizer. Writes results into TrackEvent.attributes.
+    Classifies behaviour for every track after EventGenerator runs.
+    Now reads motion_summary from TrackState.motion_samples directly.
     """
 
     def __init__(self):
         self.logger = get_logger()
+        self._eg = EventGenerator()   # used to call _analyse_motion()
 
     def analyze(
         self,
-        track_states: dict,          # {track_id: TrackState}
-        detected_objects_by_track: dict,  # {track_id: [DetectedObject]}
-    ) -> list[TemporalBehaviour]:
-        """
-        Classify behaviour for every track.
-
-        detected_objects_by_track is used to determine quadrant movement.
-        It can be empty — the analyzer degrades gracefully to time-only analysis.
-        """
+        track_states: dict,
+        detected_objects_by_track: dict,
+    ) -> list:
         results = []
         for track_id, state in track_states.items():
-            behaviour = self._classify(state, detected_objects_by_track.get(track_id, []))
-            results.append(behaviour)
+            beh = self._classify(state, detected_objects_by_track.get(track_id, []))
+            results.append(beh)
             self.logger.debug(
-                "temporal_behaviour_classified",
+                "behaviour_classified",
                 track_id=track_id,
                 cls=state.object_class,
-                behaviour=behaviour.behaviour,
-                duration=behaviour.duration_seconds,
+                behaviour=beh.behaviour,
+                motion=beh.dominant_motion,
             )
 
-        self.logger.info(
-            "temporal_analysis_complete",
-            tracks=len(results),
-            behaviours={b.behaviour: sum(1 for r in results if r.behaviour == b.behaviour)
-                        for b in results},
-        )
+        summary = {}
+        for b in results:
+            summary[b.behaviour] = summary.get(b.behaviour, 0) + 1
+        self.logger.info("temporal_analysis_complete", tracks=len(results), summary=summary)
         return results
 
     def _classify(self, state: TrackState, detections: list) -> TemporalBehaviour:
         duration = state.last_seen - state.first_seen
-
-        # Count separate "appearances" — gaps in all_seconds > 10s = separate block
-        appearances, gaps = self._count_appearances(state.all_seconds)
+        appearances, gaps = _count_appearances(state.all_seconds)
         avg_gap = sum(gaps) / len(gaps) if gaps else 0.0
 
-        # Quadrant analysis
-        quadrants = list({d.frame_quadrant for d in detections
-                          if d.frame_quadrant}) if detections else []
+        # Quadrant data from DetectedObject rows
+        quadrants = list({d.frame_quadrant for d in detections if d.frame_quadrant})
 
-        # Movement pattern: how many unique quadrants were visited
-        if len(quadrants) <= 1:
+        # ── Motion signals from frame-sequence analysis (Bug 2) ───────────────
+        motion = self._eg._analyse_motion(state)
+        dom    = motion.get("dominant_state", "unknown")
+        mevts  = motion.get("motion_events", [])
+
+        # Movement pattern: prefer motion dom over quadrant count
+        if dom in ("walking", "running"):
+            movement = "moving"
+        elif dom == "standing":
             movement = "stationary"
-        elif len(quadrants) == 2:
+        elif len(quadrants) <= 1:
+            movement = "stationary"
+        elif len(quadrants) <= 2:
             movement = "mixed"
         else:
             movement = "moving"
 
-        # ── Classify by object class ──────────────────────────────────────────
+        # ── Classify ──────────────────────────────────────────────────────────
         if state.object_class in ("car", "truck", "bus", "motorcycle", "bicycle"):
-            behaviour, notes = self._classify_vehicle(
-                duration, appearances, avg_gap, movement, quadrants)
+            behaviour, notes = self._vehicle(duration, appearances, avg_gap, movement)
         else:
-            behaviour, notes = self._classify_person(
-                duration, appearances, avg_gap, movement, quadrants, state)
+            behaviour, notes = self._person(
+                duration, appearances, avg_gap, movement, quadrants, dom, mevts)
 
         return TemporalBehaviour(
             track_id=state.track_id,
@@ -144,111 +136,108 @@ class TemporalAnalyzer:
             movement_pattern=movement,
             confidence=round(state.best_confidence, 3),
             notes=notes,
+            dominant_motion=dom,
+            motion_events=mevts,
         )
 
-    def _classify_vehicle(self, duration, appearances, avg_gap, movement, quadrants):
-        if appearances > FREQUENT_ENTRY_MIN:
-            return (
-                "repeated_visit",
-                f"Vehicle appeared {appearances} separate times "
-                f"(avg gap {avg_gap:.0f}s between visits).",
-            )
-        if duration < PASSING_THROUGH_MAX_S:
-            return (
-                "passing",
-                f"Vehicle passed through quickly ({duration:.0f}s). "
-                f"{'Moved across frame.' if movement == 'moving' else 'Briefly visible.'}",
-            )
-        if duration < PARKED_MIN_S:
-            return (
-                "waiting",
-                f"Vehicle stopped briefly for {duration:.0f}s "
-                f"({'then left' if appearances == 1 else 'with brief gaps'}).",
-            )
-        return (
-            "parked",
-            f"Vehicle stationary for {duration:.0f}s "
-            f"({duration / 60:.1f} min). Likely parked.",
-        )
+    # ── Vehicle ───────────────────────────────────────────────────────────────
 
-    def _classify_person(self, duration, appearances, avg_gap, movement, quadrants, state):
-        # Frequent re-entry
-        if appearances >= PATROL_MIN_APPEARANCES and avg_gap < 60:
+    def _vehicle(self, duration, appearances, avg_gap, movement):
+        if appearances > FREQUENT_MIN:
+            return ("repeated_visit",
+                    f"Vehicle appeared {appearances} times (avg gap {avg_gap:.0f}s).")
+        if duration < PASSING_MAX:
+            return ("passing",
+                    f"Vehicle passed through in {duration:.0f}s.")
+        if duration < PARKED_MIN:
+            return ("waiting",
+                    f"Vehicle stopped briefly for {duration:.0f}s.")
+        return ("parked",
+                f"Vehicle stationary {duration:.0f}s ({duration/60:.1f} min). Likely parked.")
+
+    # ── Person — priority ladder ──────────────────────────────────────────────
+
+    def _person(self, duration, appearances, avg_gap, movement, quadrants, dom, mevts):
+        # 1. Safety-critical: fall
+        fall_evts = [e for e in mevts if "fall_proxy" in e]
+        if fall_evts:
+            return (
+                "fall_detected",
+                f"Bbox aspect-ratio changed from upright to horizontal — "
+                f"possible fall. Event: {fall_evts[0]}. Review footage immediately.",
+            )
+
+        # 2. Running
+        if dom == "running":
+            return (
+                "running",
+                f"Person was running for most of their {duration:.0f}s presence "
+                f"(high inter-frame displacement).",
+            )
+
+        # 3. Sudden stop
+        stop_evts = [e for e in mevts if "sudden_stop" in e]
+        if stop_evts:
+            return (
+                "sudden_stop",
+                f"Person stopped abruptly after moving. {stop_evts[0]}.",
+            )
+
+        # 4. Patrol (appearances-based)
+        if appearances >= PATROL_MIN_N and avg_gap < 60:
             return (
                 "patrolling",
-                f"Person appeared {appearances} times across "
-                f"{len(set(quadrants))} frame area(s) "
-                f"(avg gap {avg_gap:.0f}s). Consistent patrol pattern.",
+                f"Person appeared {appearances}× across "
+                f"{len(set(quadrants))} area(s) (avg gap {avg_gap:.0f}s). Patrol pattern.",
             )
 
-        if appearances > FREQUENT_ENTRY_MIN:
+        # 5. Frequent entry/exit
+        if appearances > FREQUENT_MIN:
             return (
                 "frequent_entry",
-                f"Person entered and left the scene {appearances} times "
-                f"(avg gap {avg_gap:.0f}s). Frequent movement in/out.",
+                f"Person entered/exited {appearances} times (avg gap {avg_gap:.0f}s).",
             )
 
-        # Single continuous presence
-        if duration < PASSING_THROUGH_MAX_S:
-            return (
-                "passing_through",
-                f"Person briefly in frame for {duration:.0f}s. "
-                f"{'Walked across scene.' if movement == 'moving' else 'Passed by.'}",
-            )
+        # 6. Duration-based
+        if duration < PASSING_MAX:
+            desc = "Walked across scene." if movement == "moving" else "Passed by."
+            return ("passing_through", f"Brief visit {duration:.0f}s. {desc}")
 
-        if duration < LOITERING_MIN_S:
+        if duration < LOITERING_MIN:
             if movement == "moving":
-                return (
-                    "active",
-                    f"Person moving around for {duration:.0f}s across "
-                    f"{len(set(quadrants))} area(s).",
-                )
-            return (
-                "stopped",
-                f"Person stopped for {duration:.0f}s "
-                f"({'in one spot' if movement == 'stationary' else 'with some movement'}).",
-            )
+                return ("active",
+                        f"Person moving around for {duration:.0f}s across "
+                        f"{len(set(quadrants))} area(s).")
+            return ("stopped",
+                    f"Person stopped for {duration:.0f}s "
+                    f"({'one spot' if movement == 'stationary' else 'limited area'}).")
 
-        # Long presence
         if movement == "stationary":
-            return (
-                "stationary",
-                f"Person remained in one position for {duration:.0f}s "
-                f"({duration / 60:.1f} min). Likely sitting, working, or resting.",
-            )
+            return ("stationary",
+                    f"Person in one position for {duration:.0f}s "
+                    f"({duration/60:.1f} min). Sitting/working/resting.")
 
         if len(set(quadrants)) >= 3:
-            return (
-                "patrolling",
-                f"Person moved through {len(set(quadrants))} different frame areas "
-                f"over {duration:.0f}s. Consistent with patrol or active movement.",
-            )
+            return ("patrolling",
+                    f"Person covered {len(set(quadrants))} frame areas in {duration:.0f}s.")
 
         return (
             "loitering",
-            f"Person present for {duration:.0f}s ({duration / 60:.1f} min) "
-            f"in a limited area ({len(set(quadrants))} zone(s)). "
-            f"No clear destination — possible loitering.",
+            f"Person present {duration:.0f}s ({duration/60:.1f} min) "
+            f"in limited area ({len(set(quadrants))} zone(s)). No clear destination.",
         )
 
-    @staticmethod
-    def _count_appearances(all_seconds: list, gap_threshold: float = 10.0):
-        """
-        Count how many separate 'blocks' of presence exist in the timestamp list.
-        Returns (appearance_count, list_of_gaps).
 
-        Example: [1, 2, 3, 45, 46, 47] with gap_threshold=10
-          → 2 appearances, [42.0] gap
-        """
-        if not all_seconds:
-            return 1, []
+# ── Helper ────────────────────────────────────────────────────────────────────
 
-        sorted_s = sorted(all_seconds)
-        appearances = 1
-        gaps = []
-        for i in range(1, len(sorted_s)):
-            gap = sorted_s[i] - sorted_s[i - 1]
-            if gap > gap_threshold:
-                appearances += 1
-                gaps.append(gap)
-        return appearances, gaps
+def _count_appearances(all_seconds: list, gap: float = 10.0):
+    if not all_seconds:
+        return 1, []
+    s = sorted(all_seconds)
+    n, gaps = 1, []
+    for i in range(1, len(s)):
+        d = s[i] - s[i - 1]
+        if d > gap:
+            n += 1
+            gaps.append(d)
+    return n, gaps

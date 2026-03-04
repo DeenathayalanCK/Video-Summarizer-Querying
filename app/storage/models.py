@@ -270,3 +270,51 @@ Index("idx_detected_objects_class", DetectedObject.video_filename, DetectedObjec
 Index("idx_detected_objects_track", DetectedObject.video_filename, DetectedObject.track_id)
 Index("idx_track_events_video", TrackEvent.video_filename, TrackEvent.track_id)
 Index("idx_track_events_type", TrackEvent.video_filename, TrackEvent.event_type)
+
+# ── VideoTimeline: structured per-second event log + scene understanding ───────
+
+class VideoTimeline(Base):
+    """
+    Stores the full event timeline for a video as a structured JSON graph.
+
+    Two components:
+      1. timeline_entries: ordered list of {second, event, track_id, object_class,
+                            detail} covering every meaningful moment in the video.
+         Example:
+           [
+             {"second": 1.0,  "event": "enters",  "track_id": 3, "object_class": "person",
+              "detail": "Person enters from top-left"},
+             {"second": 5.0,  "event": "walking", "track_id": 3, "object_class": "person",
+              "detail": "Walking left-to-right"},
+             {"second": 14.0, "event": "exits",   "track_id": 3, "object_class": "person",
+              "detail": "Person leaves scene"},
+           ]
+
+      2. scene_events: list of scene-level detections from SceneUnderstanding.
+         Example:
+           [{"event_type": "crowd_gathering", "start_second": 5.0, ...}]
+
+    One row per video. Replaced on re-run.
+    Used by Q&A engine for richer temporal queries ("what happened at 0:09?").
+    """
+    __tablename__ = "video_timelines"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    video_filename = Column(String, nullable=False, unique=True, index=True)
+    camera_id = Column(String, nullable=False)
+
+    # Ordered list of timeline entry dicts
+    timeline_entries = Column(JSONB, nullable=False, default=list)
+
+    # Scene-level events from SceneUnderstanding
+    scene_events = Column(JSONB, nullable=False, default=list)
+
+    # Metadata
+    total_duration_seconds = Column(Float, nullable=True)
+    entry_count = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+Index("idx_video_timelines_video", VideoTimeline.video_filename)

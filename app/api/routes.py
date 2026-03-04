@@ -645,6 +645,165 @@ def get_temporal_analysis(
     }
 
 
+
+
+# ── VideoTimeline: structured event graph + scene understanding ────────────────
+
+@router.get("/video-timeline/{video_filename}")
+def get_video_timeline(
+    video_filename: str,
+    min_second: Optional[float] = Query(None),
+    max_second: Optional[float] = Query(None),
+    object_class: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Return the full structured timeline for a video (per-second event graph).
+    Much richer than /timeline — includes motion events, behaviour labels,
+    and scene-level events (crowd, fight_proxy, congestion, etc).
+    """
+    from app.storage.models import VideoTimeline
+
+    tl = (
+        db.query(VideoTimeline)
+        .filter(VideoTimeline.video_filename == video_filename)
+        .first()
+    )
+    if not tl:
+        raise HTTPException(
+            status_code=404,
+            detail="No timeline found. Run pipeline or call POST /build-timeline/{video_filename}.",
+        )
+
+    entries = tl.timeline_entries or []
+
+    # Apply filters
+    if min_second is not None:
+        entries = [e for e in entries if e["second"] >= min_second]
+    if max_second is not None:
+        entries = [e for e in entries if e["second"] <= max_second]
+    if object_class:
+        entries = [e for e in entries if e.get("object_class") == object_class
+                   or e.get("object_class") == "scene"]
+
+    return {
+        "video_filename": video_filename,
+        "total_entries": tl.entry_count,
+        "filtered_entries": len(entries),
+        "duration_seconds": tl.total_duration_seconds,
+        "timeline": entries,
+        "scene_events": tl.scene_events or [],
+        "created_at": tl.created_at.isoformat() if tl.created_at else None,
+    }
+
+
+@router.post("/build-timeline/{video_filename}")
+def build_video_timeline(video_filename: str, db: Session = Depends(get_db)):
+    """
+    Manually trigger timeline rebuild for a video.
+    Use this for videos processed before timeline storage was added.
+    """
+    from app.detection.timeline_builder import TimelineBuilder
+    from app.storage.repository import EventRepository
+
+    repo = EventRepository(db)
+    if not repo.has_track_event_data(video_filename):
+        raise HTTPException(
+            status_code=404,
+            detail="No track event data found. Run Phase 6A pipeline first.",
+        )
+
+    from app.core.config import get_settings
+    camera_id = get_settings().camera_id
+
+    try:
+        tl = TimelineBuilder(db).build(video_filename, camera_id)
+        if not tl:
+            raise HTTPException(status_code=500, detail="Timeline build returned empty result.")
+        return {
+            "video_filename": video_filename,
+            "entries": tl.entry_count,
+            "scene_events": len(tl.scene_events or []),
+            "message": "Timeline built successfully.",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/run-temporal/{video_filename}")
+def run_temporal_analysis(video_filename: str, db: Session = Depends(get_db)):
+    """
+    Re-run temporal behaviour analysis on an existing video.
+    Use for videos processed before TemporalAnalyzer was added (shows 'no data').
+    Reads existing TrackEvent + DetectedObject rows — does NOT re-run YOLO.
+    """
+    from app.storage.models import TrackEvent as TE, DetectedObject as DO
+    from app.detection.temporal_analyzer import TemporalAnalyzer
+    from app.detection.event_generator import TrackState
+    from app.storage.repository import EventRepository
+
+    repo = EventRepository(db)
+    if not repo.has_track_event_data(video_filename):
+        raise HTTPException(status_code=404, detail="No track event data found.")
+
+    # Reconstruct TrackState from existing TrackEvent rows
+    entry_events = (
+        db.query(TE)
+        .filter(TE.video_filename == video_filename, TE.event_type == "entry")
+        .all()
+    )
+
+    track_states = {}
+    for ev in entry_events:
+        ts = TrackState(
+            track_id=ev.track_id,
+            object_class=ev.object_class,
+            first_seen=ev.first_seen_second,
+            last_seen=ev.last_seen_second,
+            frame_count=max(2, int(ev.duration_seconds)),
+            best_second=ev.best_frame_second or ev.first_seen_second,
+            best_confidence=ev.best_confidence or 0.5,
+            best_crop_path=ev.best_crop_path,
+            all_seconds=[ev.first_seen_second, ev.last_seen_second],
+        )
+        track_states[ev.track_id] = ts
+
+    # Load DetectedObjects for quadrant data
+    all_dets = (
+        db.query(DO)
+        .filter(DO.video_filename == video_filename)
+        .all()
+    )
+    det_by_track = {}
+    for d in all_dets:
+        if d.track_id is not None:
+            det_by_track.setdefault(d.track_id, []).append(d)
+
+    # Run TemporalAnalyzer
+    analyser = TemporalAnalyzer()
+    behaviours = analyser.analyse(track_states, det_by_track)
+    beh_map = {b.track_id: b for b in behaviours}
+
+    # Write results back into all TrackEvent rows for this video
+    all_events = db.query(TE).filter(TE.video_filename == video_filename).all()
+    updated = 0
+    for ev in all_events:
+        beh = beh_map.get(ev.track_id)
+        if beh:
+            attrs = dict(ev.attributes or {})
+            attrs["temporal"] = beh.to_dict()
+            ev.attributes = attrs
+            updated += 1
+    db.commit()
+
+    return {
+        "video_filename": video_filename,
+        "tracks_analysed": len(behaviours),
+        "events_updated": updated,
+        "behaviours": {b.track_id: b.behaviour for b in behaviours},
+        "message": "Temporal analysis complete. Refresh the Temporal tab.",
+    }
+
 @router.post("/index")
 def trigger_reindex(db: Session = Depends(get_db)):
     count = CaptionIndexer(db).index_all_unindexed()

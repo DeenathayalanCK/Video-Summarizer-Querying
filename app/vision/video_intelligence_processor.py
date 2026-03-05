@@ -45,6 +45,7 @@ from app.detection.appearance_reid import AppearanceReID
 from app.detection.temporal_analyzer import TemporalAnalyzer
 from app.detection.object_indexer import ObjectIndexer
 from app.detection.attribute_processor import AttributeProcessor
+from sqlalchemy.orm.attributes import flag_modified
 from app.storage.database import SessionLocal
 from app.storage.repository import EventRepository
 from app.rag.summarizer import VideoSummarizer
@@ -130,6 +131,11 @@ class VideoIntelligenceProcessor:
                 if not repo.has_6b_completed(video_file) and repo.has_detection_data(video_file):
                     self.logger.info("resuming_6b_only", video=video_file)
                     self._run_6b_only(video_file, db, repo)
+                elif repo.has_track_event_data(video_file) and not repo.has_temporal_data(video_file):
+                    # Video fully complete but temporal analysis was never saved
+                    # (e.g. processed before TemporalAnalyzer was added, or failed silently)
+                    self.logger.info("temporal_backfill_needed", video=video_file)
+                    self._run_6b_only(video_file, db, repo)  # backfill runs temporal inside
                 else:
                     self.logger.info("already_complete_skip", video=video_file)
                 return
@@ -262,6 +268,7 @@ class VideoIntelligenceProcessor:
                             # Store as list (JSON-serialisable)
                             attrs["reid_embedding"] = reid_embeddings[ev.track_id].tolist()
                         saved_ev.attributes = attrs
+                        flag_modified(saved_ev, "attributes")
                     indexer.index_track_event(saved_ev)
 
                 db.commit()
@@ -290,6 +297,7 @@ class VideoIntelligenceProcessor:
                             attrs = dict(ev.attributes or {})
                             attrs["temporal"] = beh.to_dict()
                             ev.attributes = attrs
+                            flag_modified(ev, "attributes")
                     db.commit()
                     self.logger.info("temporal_done", video=video_file,
                                      tracks=len(behaviours))
@@ -386,6 +394,80 @@ class VideoIntelligenceProcessor:
                 self.logger.warning("summary_regen_failed", video=video_file, error=str(e))
         except Exception as e:
             self.logger.error("6b_only_failed", video=video_file, error=str(e))
+
+        # Also re-run temporal analysis if any entry-type TrackEvent is missing
+        # temporal data (video processed before TemporalAnalyzer was added, or
+        # the temporal step failed silently on the original run).
+        try:
+            from app.storage.models import TrackEvent, DetectedObject
+            from app.detection.temporal_analyzer import TemporalAnalyzer
+            from app.detection.event_generator import TrackState
+            from sqlalchemy.orm.attributes import flag_modified
+
+            entry_events = (
+                db.query(TrackEvent)
+                .filter(
+                    TrackEvent.video_filename == video_file,
+                    TrackEvent.event_type == "entry",
+                )
+                .all()
+            )
+            # Only re-run if any entry event is missing temporal data
+            needs_temporal = any(
+                not (ev.attributes or {}).get("temporal") for ev in entry_events
+            )
+            if not needs_temporal:
+                return
+
+            self.logger.info("temporal_backfill_starting", video=video_file)
+            all_dets = (
+                db.query(DetectedObject)
+                .filter(DetectedObject.video_filename == video_file)
+                .order_by(DetectedObject.frame_second_offset)
+                .all()
+            )
+            det_by_track = {}
+            seconds_by_track = {}
+            for d in all_dets:
+                if d.track_id is not None:
+                    det_by_track.setdefault(d.track_id, []).append(d)
+                    seconds_by_track.setdefault(d.track_id, []).append(d.frame_second_offset)
+
+            track_states = {}
+            for ev in entry_events:
+                secs = seconds_by_track.get(ev.track_id) or [
+                    ev.first_seen_second, ev.last_seen_second
+                ]
+                track_states[ev.track_id] = TrackState(
+                    track_id=ev.track_id,
+                    object_class=ev.object_class,
+                    first_seen=ev.first_seen_second,
+                    last_seen=ev.last_seen_second,
+                    frame_count=max(2, len(secs)),
+                    best_second=ev.best_frame_second or ev.first_seen_second,
+                    best_confidence=ev.best_confidence or 0.5,
+                    best_crop_path=ev.best_crop_path,
+                    all_seconds=secs,
+                )
+
+            behaviours = TemporalAnalyzer().analyze(track_states, det_by_track)
+            beh_map = {b.track_id: b for b in behaviours}
+
+            all_events = db.query(TrackEvent).filter(
+                TrackEvent.video_filename == video_file
+            ).all()
+            for ev in all_events:
+                beh = beh_map.get(ev.track_id)
+                if beh:
+                    attrs = dict(ev.attributes or {})
+                    attrs["temporal"] = beh.to_dict()
+                    ev.attributes = attrs
+                    flag_modified(ev, "attributes")
+            db.commit()
+            self.logger.info("temporal_backfill_done", video=video_file,
+                             tracks=len(behaviours))
+        except Exception as e:
+            self.logger.warning("temporal_backfill_failed", video=video_file, error=str(e))
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

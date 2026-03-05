@@ -325,6 +325,21 @@ class EventRepository:
             .first()
         ) is not None
 
+    def has_temporal_data(self, video_filename: str) -> bool:
+        """
+        Return True if at least one entry-type TrackEvent for this video
+        has a 'temporal' key in its attributes (i.e. TemporalAnalyzer ran).
+        """
+        entry_events = (
+            self.db.query(TrackEvent)
+            .filter(
+                TrackEvent.video_filename == video_filename,
+                TrackEvent.event_type == "entry",
+            )
+            .all()
+        )
+        return any((ev.attributes or {}).get("temporal") for ev in entry_events)
+
     def clear_detection_data(self, video_filename: str) -> None:
         """
         Remove ALL Phase 6A/6B rows for a video so a retry starts completely clean.

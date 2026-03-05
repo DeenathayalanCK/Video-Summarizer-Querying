@@ -2117,8 +2117,10 @@
             return;
           }
 
+          // Note banner (kept in html so it isn't replaced later)
+          let noteBanner = "";
           if (data.note) {
-            el.innerHTML = `
+            noteBanner = `
                     <div class="text-sm text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-4 py-3 mb-4 flex items-start gap-3">
                       <div class="flex-1">
                         <div class="font-medium mb-1">Temporal analysis not available</div>
@@ -2147,7 +2149,9 @@
             })
             .join("");
 
-          let html = `
+          let html =
+            noteBanner +
+            `
                   <div class="mb-4">
                     <p class="text-xs text-gray-500 mb-2">
                       ${data.count} tracks in <span class="text-white">${video}</span>

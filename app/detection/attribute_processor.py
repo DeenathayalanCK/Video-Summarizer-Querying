@@ -18,6 +18,7 @@ Design:
 import os
 from typing import Optional
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -185,7 +186,13 @@ class AttributeProcessor:
             # ── Write attributes to all TrackEvents for this track_id ──────────
             track_events_for_this_track = all_events_by_track.get(track_id, [])
             for ev in track_events_for_this_track:
-                ev.attributes = attributes_dict
+                # Merge new attributes into existing JSONB to preserve keys
+                # like "temporal" and "motion_summary" written by earlier pipeline
+                # phases.  Replacing entirely would wipe those values.
+                merged_attrs = dict(ev.attributes or {})
+                merged_attrs.update(attributes_dict)
+                ev.attributes = merged_attrs
+                flag_modified(ev, "attributes")
 
                 # Build event-type-specific rag_text for exit/dwell
                 if ev.event_type != "entry" and object_class in VEHICLE_CLASSES and vehicle_attrs:

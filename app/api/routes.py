@@ -248,7 +248,7 @@ def list_videos(db: Session = Depends(get_db)):
                 "caption_count": caption_counts.get(vf, 0),
                 "has_summary": vf in summaries,
                 "processing_status": statuses.get(vf, "unknown"),
-                "pipeline": "detection" if vf in det_counts else "caption" if vf in caption_counts else "unknown",
+                "pipeline": "detection" if (vf in det_counts or vf in statuses) else "caption" if vf in caption_counts else "unknown",
                 "phase_6b_completed": phase_6b.get(vf, False),
             }
             for vf in sorted(all_videos)
@@ -741,12 +741,28 @@ def run_temporal_analysis(video_filename: str, db: Session = Depends(get_db)):
     from app.detection.temporal_analyzer import TemporalAnalyzer
     from app.detection.event_generator import TrackState
     from app.storage.repository import EventRepository
+    from sqlalchemy.orm.attributes import flag_modified
 
     repo = EventRepository(db)
     if not repo.has_track_event_data(video_filename):
         raise HTTPException(status_code=404, detail="No track event data found.")
 
-    # Reconstruct TrackState from existing TrackEvent rows
+    # Load DetectedObjects for quadrant data + to rebuild all_seconds per track
+    all_dets = (
+        db.query(DO)
+        .filter(DO.video_filename == video_filename)
+        .order_by(DO.frame_second_offset)
+        .all()
+    )
+    det_by_track = {}
+    seconds_by_track = {}
+    for d in all_dets:
+        if d.track_id is not None:
+            det_by_track.setdefault(d.track_id, []).append(d)
+            seconds_by_track.setdefault(d.track_id, []).append(d.frame_second_offset)
+
+    # Reconstruct TrackState from existing TrackEvent rows.
+    # Populate all_seconds from DetectedObject rows for accurate appearance counting.
     entry_events = (
         db.query(TE)
         .filter(TE.video_filename == video_filename, TE.event_type == "entry")
@@ -755,36 +771,27 @@ def run_temporal_analysis(video_filename: str, db: Session = Depends(get_db)):
 
     track_states = {}
     for ev in entry_events:
+        secs = seconds_by_track.get(ev.track_id) or [ev.first_seen_second, ev.last_seen_second]
         ts = TrackState(
             track_id=ev.track_id,
             object_class=ev.object_class,
             first_seen=ev.first_seen_second,
             last_seen=ev.last_seen_second,
-            frame_count=max(2, int(ev.duration_seconds)),
+            frame_count=max(2, len(secs)),
             best_second=ev.best_frame_second or ev.first_seen_second,
             best_confidence=ev.best_confidence or 0.5,
             best_crop_path=ev.best_crop_path,
-            all_seconds=[ev.first_seen_second, ev.last_seen_second],
+            all_seconds=secs,
         )
         track_states[ev.track_id] = ts
-
-    # Load DetectedObjects for quadrant data
-    all_dets = (
-        db.query(DO)
-        .filter(DO.video_filename == video_filename)
-        .all()
-    )
-    det_by_track = {}
-    for d in all_dets:
-        if d.track_id is not None:
-            det_by_track.setdefault(d.track_id, []).append(d)
 
     # Run TemporalAnalyzer
     analyser = TemporalAnalyzer()
     behaviours = analyser.analyze(track_states, det_by_track)
     beh_map = {b.track_id: b for b in behaviours}
 
-    # Write results back into all TrackEvent rows for this video
+    # Write results back into all TrackEvent rows for this video.
+    # flag_modified is required so SQLAlchemy detects the JSONB mutation.
     all_events = db.query(TE).filter(TE.video_filename == video_filename).all()
     updated = 0
     for ev in all_events:
@@ -793,6 +800,7 @@ def run_temporal_analysis(video_filename: str, db: Session = Depends(get_db)):
             attrs = dict(ev.attributes or {})
             attrs["temporal"] = beh.to_dict()
             ev.attributes = attrs
+            flag_modified(ev, "attributes")
             updated += 1
     db.commit()
 

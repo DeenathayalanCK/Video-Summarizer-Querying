@@ -173,6 +173,23 @@
         <!-- Tabs -->
         <div class="flex border-b border-gray-800 px-6">
           <button
+            onclick="showTab('live')"
+            id="tab-live"
+            class="tab-btn px-4 py-2 text-sm font-medium rounded-lg text-gray-500 transition-colors flex items-center gap-1.5"
+          >
+            <span class="relative flex h-2 w-2">
+              <span
+                id="live-dot-pulse"
+                class="hidden animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"
+              ></span>
+              <span
+                id="live-dot"
+                class="relative inline-flex rounded-full h-2 w-2 bg-gray-500"
+              ></span>
+            </span>
+            Live
+          </button>
+          <button
             onclick="showTab('search')"
             id="tab-search"
             class="tab-active px-4 py-3 text-sm font-medium transition"
@@ -226,6 +243,201 @@
         <!-- Tab panels -->
         <div class="flex-1 overflow-y-auto">
           <!-- SEARCH TAB -->
+          <!-- ── Live Stream Panel ─────────────────────────────────────────── -->
+          <div id="panel-live" class="hidden">
+            <div class="flex flex-col gap-4">
+              <!-- Live sub-tabs -->
+              <div class="flex gap-1 border-b border-gray-800 pb-2">
+                <button
+                  onclick="liveSubTab('stream')"
+                  id="live-sub-stream"
+                  class="px-3 py-1.5 text-xs font-medium rounded-t text-white bg-gray-700"
+                >
+                  📹 Stream
+                </button>
+                <button
+                  onclick="liveSubTab('history')"
+                  id="live-sub-history"
+                  class="px-3 py-1.5 text-xs font-medium rounded-t text-gray-500 hover:text-gray-300"
+                >
+                  🗂 History
+                </button>
+              </div>
+
+              <!-- STREAM sub-tab -->
+              <div id="live-subtab-stream">
+                <!-- Top bar: controls + status -->
+                <div class="flex items-center gap-3 flex-wrap">
+                  <button
+                    id="live-start-btn"
+                    onclick="liveStart()"
+                    class="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors"
+                  >
+                    <span class="relative flex h-2 w-2">
+                      <span
+                        class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-300 opacity-75"
+                      ></span>
+                      <span
+                        class="relative inline-flex rounded-full h-2 w-2 bg-red-200"
+                      ></span>
+                    </span>
+                    Start Live
+                  </button>
+                  <button
+                    onclick="liveStop()"
+                    class="px-4 py-2 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm font-medium transition-colors"
+                  >
+                    Stop
+                  </button>
+                  <button
+                    onclick="liveResetIdentities()"
+                    class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 text-sm transition-colors"
+                  >
+                    Reset Identities
+                  </button>
+                  <div
+                    id="live-status-bar"
+                    class="ml-auto text-xs text-gray-500"
+                  ></div>
+                </div>
+
+                <!-- Main layout: stream + sidebar -->
+                <div class="flex gap-4" style="min-height: 420px">
+                  <!-- MJPEG Stream -->
+                  <div
+                    class="relative flex-1 bg-black rounded-xl overflow-hidden"
+                    style="min-height: 360px"
+                  >
+                    <img
+                      id="live-stream-img"
+                      class="w-full h-full object-contain"
+                      src=""
+                      alt="Live stream"
+                      onerror="this.style.opacity = '0.3'"
+                    />
+                    <div
+                      id="live-offline-msg"
+                      class="absolute inset-0 flex items-center justify-center text-gray-600 text-sm"
+                    >
+                      Stream offline — press Start Live
+                    </div>
+                  </div>
+
+                  <!-- Active persons sidebar -->
+                  <div
+                    class="w-64 flex flex-col gap-2 overflow-y-auto"
+                    style="max-height: 420px"
+                  >
+                    <div
+                      class="text-xs text-gray-500 uppercase tracking-wide px-1"
+                    >
+                      Active Now — <span id="live-active-count">0</span> persons
+                    </div>
+                    <div
+                      id="live-person-cards"
+                      class="flex flex-col gap-2"
+                    ></div>
+                  </div>
+                </div>
+
+                <!-- Today's session log -->
+                <div class="glass rounded-xl p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-medium text-gray-300"
+                      >Person Sessions Today</span
+                    >
+                    <span
+                      id="live-session-count"
+                      class="text-xs text-gray-500"
+                    ></span>
+                  </div>
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-xs text-gray-400">
+                      <thead>
+                        <tr class="border-b border-gray-800 text-left">
+                          <th class="pb-2 pr-4 font-medium text-gray-500">
+                            ID
+                          </th>
+                          <th class="pb-2 pr-4 font-medium text-gray-500">
+                            Entry
+                          </th>
+                          <th class="pb-2 pr-4 font-medium text-gray-500">
+                            Exit
+                          </th>
+                          <th class="pb-2 pr-4 font-medium text-gray-500">
+                            Duration
+                          </th>
+                          <th class="pb-2 font-medium text-gray-500">
+                            Last State
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody id="live-session-tbody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <!-- end live-subtab-stream -->
+
+              <!-- HISTORY sub-tab -->
+              <div id="live-subtab-history" class="hidden">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="text-sm font-medium text-gray-300"
+                    >All Known Persons</span
+                  >
+                  <button
+                    onclick="loadLiveHistory()"
+                    class="text-xs text-indigo-400 hover:text-indigo-300"
+                  >
+                    ↻ Refresh
+                  </button>
+                </div>
+
+                <!-- Person grid -->
+                <div
+                  id="live-history-grid"
+                  class="grid gap-4"
+                  style="
+                    grid-template-columns: repeat(
+                      auto-fill,
+                      minmax(280px, 1fr)
+                    );
+                  "
+                >
+                  <div
+                    class="text-gray-600 text-sm text-center py-8 col-span-full"
+                  >
+                    Loading history...
+                  </div>
+                </div>
+
+                <!-- Person detail modal -->
+                <div
+                  id="live-person-modal"
+                  class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+                >
+                  <div
+                    class="glass rounded-2xl p-6 w-full max-w-2xl max-h-screen overflow-y-auto mx-4"
+                  >
+                    <div class="flex justify-between items-start mb-4">
+                      <h2 id="modal-title" class="text-lg font-bold text-white">
+                        Person Detail
+                      </h2>
+                      <button
+                        onclick="closePersonModal()"
+                        class="text-gray-500 hover:text-white text-xl leading-none"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div id="modal-body"></div>
+                  </div>
+                </div>
+              </div>
+              <!-- end live-subtab-history -->
+            </div>
+          </div>
+
           <div id="panel-search" class="p-6">
             <div class="max-w-4xl mx-auto">
               <!-- Search bar -->
@@ -685,6 +897,7 @@
 
       function showTab(name) {
         [
+          "live",
           "search",
           "ask",
           "timeline",
@@ -2573,6 +2786,512 @@
         // Configure marked for security and consistent output
         marked.setOptions({ breaks: true, gfm: true });
         return marked.parse(text);
+      }
+
+      // ══════════════════════════════════════════════════════════════════════
+      // LIVE STREAM  ─  polling + MJPEG controls
+      // ══════════════════════════════════════════════════════════════════════
+
+      let _livePollTimer = null;
+      let _liveRunning = false;
+
+      async function liveStart() {
+        try {
+          await apiFetch("/live/start", { method: "POST" });
+        } catch (e) {
+          // 400 = already running — that's fine
+        }
+        _liveRunning = true;
+
+        // Wire MJPEG stream into img tag
+        const img = document.getElementById("live-stream-img");
+        img.src = API + "/live/stream?" + Date.now();
+        document.getElementById("live-offline-msg").style.display = "none";
+
+        // Update LIVE tab dot
+        document.getElementById("live-dot").className =
+          "relative inline-flex rounded-full h-2 w-2 bg-red-500";
+        document.getElementById("live-dot-pulse").classList.remove("hidden");
+
+        // Start polling for active persons + sessions
+        _livePoll();
+        _livePollTimer = setInterval(_livePoll, 3000);
+      }
+
+      async function liveStop() {
+        try {
+          await apiFetch("/live/stop", { method: "POST" });
+        } catch (e) {}
+        _liveRunning = false;
+        clearInterval(_livePollTimer);
+        const img = document.getElementById("live-stream-img");
+        img.src = "";
+        document.getElementById("live-offline-msg").style.display = "flex";
+        document.getElementById("live-dot").className =
+          "relative inline-flex rounded-full h-2 w-2 bg-gray-500";
+        document.getElementById("live-dot-pulse").classList.add("hidden");
+        document.getElementById("live-status-bar").textContent = "Stopped";
+      }
+
+      async function liveResetIdentities() {
+        if (
+          !confirm(
+            "Reset all person identities? This clears P1/P2/... history.",
+          )
+        )
+          return;
+        try {
+          await apiFetch("/live/identities", { method: "DELETE" });
+          _livePoll();
+          alert("Identities reset. Labels will restart from P1.");
+        } catch (e) {
+          alert("Reset failed: " + e.message);
+        }
+      }
+
+      async function _livePoll() {
+        try {
+          // Active persons (sidebar cards)
+          const activeData = await apiFetch("/live/active");
+          _renderPersonCards(activeData.persons || []);
+          document.getElementById("live-active-count").textContent =
+            activeData.count || 0;
+
+          // Today's sessions (table)
+          const sessData = await apiFetch("/live/sessions");
+          _renderSessionTable(sessData.sessions || []);
+
+          // Status bar
+          const st = await apiFetch("/live/status");
+          document.getElementById("live-status-bar").innerHTML =
+            `<span class="text-gray-400">${st.sessions_today} sessions today</span>` +
+            `&nbsp;·&nbsp;<span class="text-gray-500">${st.total_identities} known persons</span>` +
+            (st.running
+              ? `&nbsp;·&nbsp;<span class="text-emerald-500">● live</span>`
+              : `&nbsp;·&nbsp;<span class="text-gray-600">● offline</span>`);
+        } catch (e) {
+          console.warn("live poll error", e);
+        }
+      }
+
+      function _stateColor(state) {
+        const map = {
+          walking: "#22c55e",
+          running: "#f97316",
+          stationary: "#60a5fa",
+          entering: "#a78bfa",
+          unknown: "#6b7280",
+        };
+        return map[state] || "#6b7280";
+      }
+
+      function _stateEmoji(state) {
+        const map = {
+          walking: "🚶",
+          running: "🏃",
+          stationary: "🧍",
+          entering: "➡️",
+          unknown: "❓",
+        };
+        return map[state] || "👤";
+      }
+
+      function _fmtTime(iso) {
+        if (!iso) return "—";
+        const d = new Date(iso + "Z");
+        return d.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+      }
+
+      function _fmtDur(secs) {
+        if (!secs) return "—";
+        secs = Math.round(secs);
+        if (secs < 60) return secs + "s";
+        const m = Math.floor(secs / 60),
+          s = secs % 60;
+        return `${m}m ${s}s`;
+      }
+
+      function _renderPersonCards(persons) {
+        const container = document.getElementById("live-person-cards");
+        if (!persons.length) {
+          container.innerHTML =
+            '<div class="text-xs text-gray-600 px-1 py-4 text-center">No one detected</div>';
+          return;
+        }
+        container.innerHTML = persons
+          .map((p) => {
+            const col = _stateColor(p.last_state);
+            const emoji = _stateEmoji(p.last_state);
+            const dur = _fmtDur(p.duration_seconds);
+            const cropUrl =
+              API +
+              "/live/crop/" +
+              encodeURIComponent(p.person_label) +
+              "?" +
+              Math.floor(Date.now() / 5000);
+            return `
+            <div class="glass rounded-xl p-3 flex gap-3 items-center border"
+              style="border-color:${col}44">
+              <div class="relative w-10 h-12 rounded-lg overflow-hidden bg-gray-800 flex-shrink-0">
+                <img src="${cropUrl}"
+                  class="w-full h-full object-cover"
+                  onerror="this.style.display='none'"
+                  alt="${p.person_label}"/>
+                <span class="absolute inset-0 flex items-center justify-center text-xl
+                  pointer-events-none" id="crop-fallback-${p.person_label}">👤</span>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center justify-between">
+                  <span class="font-bold text-sm" style="color:${col}">
+                    ${p.person_label}
+                  </span>
+                  <span class="text-xs text-gray-500">${dur}</span>
+                </div>
+                <div class="text-xs font-medium mt-0.5" style="color:${col}">
+                  ${emoji} ${(p.last_state || "unknown").toUpperCase()}
+                </div>
+                <div class="text-xs text-gray-600 mt-0.5">
+                  in ${_fmtTime(p.entry_time)}
+                </div>
+              </div>
+            </div>
+          `;
+          })
+          .join("");
+      }
+
+      function _renderSessionTable(sessions) {
+        const tbody = document.getElementById("live-session-tbody");
+        document.getElementById("live-session-count").textContent =
+          sessions.length + " session(s)";
+
+        if (!sessions.length) {
+          tbody.innerHTML =
+            '<tr><td colspan="5" class="py-4 text-center text-gray-700">No sessions yet today</td></tr>';
+          return;
+        }
+        tbody.innerHTML = sessions
+          .map((s) => {
+            const isActive = s.is_active;
+            const stateCol = _stateColor(s.last_state);
+            return `
+            <tr class="border-b border-gray-900 hover:bg-gray-900/40 transition-colors">
+              <td class="py-2 pr-4">
+                <span class="font-semibold" style="color:${stateCol}">${s.person_label}</span>
+                ${isActive ? '<span class="ml-1 text-red-500 animate-pulse">●</span>' : ""}
+              </td>
+              <td class="py-2 pr-4 tabular-nums">${_fmtTime(s.entry_time)}</td>
+              <td class="py-2 pr-4 tabular-nums text-gray-600">
+                ${isActive ? '<span class="text-emerald-600">now</span>' : _fmtTime(s.exit_time)}
+              </td>
+              <td class="py-2 pr-4 tabular-nums">${_fmtDur(s.duration_seconds)}</td>
+              <td class="py-2">
+                <span class="text-xs" style="color:${stateCol}">
+                  ${_stateEmoji(s.last_state)} ${s.last_state || "—"}
+                </span>
+              </td>
+            </tr>
+          `;
+          })
+          .join("");
+      }
+
+      // Auto-resume poll if user returns to Live tab while stream is running
+      const _origShowTab = showTab;
+      // Override tab switching to resume poll on Live tab open
+      window.addEventListener("load", () => {
+        document.getElementById("tab-live").addEventListener("click", () => {
+          if (_liveRunning && !_livePollTimer) {
+            _livePollTimer = setInterval(_livePoll, 3000);
+          }
+          _livePoll();
+        });
+      });
+
+      // ══════════════════════════════════════════════════════════════════════
+      // LIVE HISTORY TAB
+      // ══════════════════════════════════════════════════════════════════════
+
+      function liveSubTab(name) {
+        ["stream", "history"].forEach((t) => {
+          document
+            .getElementById("live-subtab-" + t)
+            .classList.toggle("hidden", t !== name);
+          const btn = document.getElementById("live-sub-" + t);
+          if (t === name) {
+            btn.className =
+              "px-3 py-1.5 text-xs font-medium rounded-t text-white bg-gray-700";
+          } else {
+            btn.className =
+              "px-3 py-1.5 text-xs font-medium rounded-t text-gray-500 hover:text-gray-300";
+          }
+        });
+        if (name === "history") loadLiveHistory();
+      }
+
+      async function loadLiveHistory() {
+        const grid = document.getElementById("live-history-grid");
+        grid.innerHTML =
+          '<div class="text-gray-600 text-sm text-center py-8 col-span-full">Loading...</div>';
+        try {
+          const data = await apiFetch("/live/history");
+          const persons = data.persons || [];
+          if (!persons.length) {
+            grid.innerHTML =
+              '<div class="text-gray-600 text-sm text-center py-8 col-span-full">No persons recorded yet. Start the live stream to begin tracking.</div>';
+            return;
+          }
+          grid.innerHTML = persons.map((p) => _historyCard(p)).join("");
+          lucide.createIcons();
+        } catch (e) {
+          grid.innerHTML =
+            '<div class="text-red-500 text-sm text-center py-4 col-span-full">Error: ' +
+            e.message +
+            "</div>";
+        }
+      }
+
+      function _historyCard(p) {
+        const cropUrl =
+          API +
+          "/live/crop/" +
+          encodeURIComponent(p.person_label) +
+          "?" +
+          Date.now();
+        const col = _stateColor(p.top_state);
+        const isActive = p.is_active_now;
+        const lastSeen = p.last_seen_at ? new Date(p.last_seen_at + "Z") : null;
+        const lastSeenStr = lastSeen
+          ? lastSeen.toLocaleString([], {
+              month: "short",
+              day: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "—";
+        const avgDur = _fmtDur(p.avg_duration_seconds);
+
+        // Attribute badges
+        const attrs = p.attributes || {};
+        const badges = [];
+        if (attrs.gender_estimate && attrs.gender_estimate !== "unknown")
+          badges.push(attrs.gender_estimate);
+        if (attrs.age_estimate && attrs.age_estimate !== "unknown")
+          badges.push(attrs.age_estimate);
+        if (attrs.clothing_top && attrs.clothing_top !== "unknown")
+          badges.push(attrs.clothing_top);
+        if (attrs.color && attrs.color !== "unknown") badges.push(attrs.color);
+        const badgeHtml = badges
+          .map(
+            (b) =>
+              `<span class="px-1.5 py-0.5 rounded text-xs bg-gray-800 text-gray-400">${b}</span>`,
+          )
+          .join(" ");
+
+        return `
+          <div class="glass rounded-xl p-4 cursor-pointer hover:border-indigo-500/40
+            border border-transparent transition-all"
+            onclick="openPersonModal('${p.person_label}')">
+
+            <div class="flex gap-3">
+              <!-- Crop thumbnail -->
+              <div class="relative w-16 h-20 rounded-lg overflow-hidden bg-gray-800 flex-shrink-0">
+                <img src="${cropUrl}" class="w-full h-full object-cover"
+                  onerror="this.style.display='none'" alt="${p.person_label}"/>
+                <div class="absolute inset-0 flex items-center justify-center text-3xl
+                  pointer-events-none select-none">👤</div>
+                ${isActive ? `<div class="absolute top-1 right-1 w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>` : ""}
+              </div>
+
+              <!-- Info -->
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="font-bold text-base" style="color:${col}">${p.person_label}</span>
+                  ${isActive ? '<span class="text-xs text-red-400 font-medium">● LIVE</span>' : ""}
+                </div>
+                <div class="text-xs text-gray-400 space-y-0.5">
+                  <div>👁 ${p.total_visits} visit${p.total_visits !== 1 ? "s" : ""} &nbsp;·&nbsp; ⏱ avg ${avgDur}</div>
+                  <div>🕐 Last: ${lastSeenStr}</div>
+                  <div class="mt-1 flex flex-wrap gap-1">${badgeHtml || '<span class="text-gray-600">No attributes yet</span>'}</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- State distribution bar -->
+            <div class="mt-3 flex gap-1 h-1.5 rounded-full overflow-hidden">
+              ${_stateBars(p)}
+            </div>
+            <div class="mt-1 text-xs text-gray-600">${p.session_count} session(s) recorded</div>
+          </div>
+        `;
+      }
+
+      function _stateBars(p) {
+        // Minimal colored bar based on top_state
+        const stateColors = {
+          walking: "#22c55e",
+          running: "#f97316",
+          stationary: "#60a5fa",
+          entering: "#a78bfa",
+          unknown: "#374151",
+        };
+        const col = stateColors[p.top_state] || "#374151";
+        return `<div class="flex-1 rounded-full" style="background:${col}44"></div>
+                <div style="width:40%;background:${col};border-radius:999px"></div>`;
+      }
+
+      async function openPersonModal(personLabel) {
+        document.getElementById("modal-title").textContent =
+          personLabel + " — Full History";
+        document.getElementById("modal-body").innerHTML =
+          '<div class="text-gray-500 text-sm text-center py-8">Loading...</div>';
+        document.getElementById("live-person-modal").classList.remove("hidden");
+
+        try {
+          const p = await apiFetch(
+            "/live/person/" + encodeURIComponent(personLabel),
+          );
+          document.getElementById("modal-body").innerHTML = _personModalBody(p);
+          lucide.createIcons();
+        } catch (e) {
+          document.getElementById("modal-body").innerHTML =
+            '<div class="text-red-500 text-sm">' + e.message + "</div>";
+        }
+      }
+
+      function closePersonModal() {
+        document.getElementById("live-person-modal").classList.add("hidden");
+      }
+      // Close modal on backdrop click
+      document.addEventListener("click", (e) => {
+        const modal = document.getElementById("live-person-modal");
+        if (modal && e.target === modal) closePersonModal();
+      });
+
+      function _personModalBody(p) {
+        const cropUrl =
+          API +
+          "/live/crop/" +
+          encodeURIComponent(p.person_label) +
+          "?" +
+          Date.now();
+        const attrs = p.attributes || {};
+
+        // Attribute table rows
+        const attrRows = Object.entries(attrs)
+          .filter(([k, v]) => v && v !== "unknown" && v !== "none")
+          .map(
+            ([k, v]) => `
+            <tr class="border-b border-gray-800">
+              <td class="py-1.5 pr-4 text-xs text-gray-500 capitalize">${k.replace(/_/g, " ")}</td>
+              <td class="py-1.5 text-xs text-gray-200">${v}</td>
+            </tr>`,
+          )
+          .join("");
+
+        // Session rows
+        const sessRows = (p.sessions || [])
+          .map((s) => {
+            const col = _stateColor(s.last_state);
+            return `
+            <tr class="border-b border-gray-900 text-xs">
+              <td class="py-1.5 pr-3 tabular-nums text-gray-300">${_fmtTime(s.entry_time)}</td>
+              <td class="py-1.5 pr-3 tabular-nums text-gray-500">
+                ${s.is_active ? '<span class="text-emerald-500">now</span>' : _fmtTime(s.exit_time)}
+              </td>
+              <td class="py-1.5 pr-3">${_fmtDur(s.duration_seconds)}</td>
+              <td class="py-1.5"><span style="color:${col}">${_stateEmoji(s.last_state)} ${s.last_state || "—"}</span></td>
+            </tr>`;
+          })
+          .join("");
+
+        return `
+          <!-- Header: crop + stats -->
+          <div class="flex gap-4 mb-5">
+            <div class="w-24 h-32 rounded-xl overflow-hidden bg-gray-800 flex-shrink-0 relative">
+              <img src="${cropUrl}" class="w-full h-full object-cover"
+                onerror="this.style.display='none'" alt="${p.person_label}"/>
+              <div class="absolute inset-0 flex items-center justify-center text-4xl
+                pointer-events-none select-none">👤</div>
+            </div>
+            <div class="flex-1">
+              <div class="grid grid-cols-2 gap-3 text-center">
+                <div class="glass rounded-lg p-2">
+                  <div class="text-xl font-bold text-white">${p.total_visits}</div>
+                  <div class="text-xs text-gray-500">Total Visits</div>
+                </div>
+                <div class="glass rounded-lg p-2">
+                  <div class="text-xl font-bold text-white">${_fmtDur(p.avg_duration_seconds)}</div>
+                  <div class="text-xs text-gray-500">Avg Duration</div>
+                </div>
+                <div class="glass rounded-lg p-2">
+                  <div class="text-sm font-bold text-white">${_fmtTime(p.first_seen_at)}</div>
+                  <div class="text-xs text-gray-500">First Seen</div>
+                </div>
+                <div class="glass rounded-lg p-2">
+                  <div class="text-sm font-bold text-white">${_fmtTime(p.last_seen_at)}</div>
+                  <div class="text-xs text-gray-500">Last Seen</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- State breakdown -->
+          ${
+            p.state_breakdown && Object.keys(p.state_breakdown).length
+              ? `
+          <div class="mb-4">
+            <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Behaviour Breakdown</div>
+            <div class="flex gap-2 flex-wrap">
+              ${Object.entries(p.state_breakdown)
+                .map(
+                  ([state, count]) =>
+                    `<span class="px-2 py-1 rounded-full text-xs font-medium"
+                  style="background:${_stateColor(state)}22;color:${_stateColor(state)}">
+                  ${_stateEmoji(state)} ${state} ×${count}
+                </span>`,
+                )
+                .join("")}
+            </div>
+          </div>`
+              : ""
+          }
+
+          <!-- Attributes -->
+          ${
+            attrRows
+              ? `
+          <div class="mb-4">
+            <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Attributes</div>
+            <table class="w-full"><tbody>${attrRows}</tbody></table>
+          </div>`
+              : '<div class="text-xs text-gray-600 mb-4">No attribute data extracted yet. Run attribute extraction on recordings to see clothing, age, gender here.</div>'
+          }
+
+          <!-- Session history -->
+          <div>
+            <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">
+              Session History (${p.sessions.length})
+            </div>
+            <div class="overflow-y-auto" style="max-height:200px">
+              <table class="w-full">
+                <thead>
+                  <tr class="text-xs text-gray-600 border-b border-gray-800">
+                    <th class="pb-1 pr-3 text-left font-medium">Entry</th>
+                    <th class="pb-1 pr-3 text-left font-medium">Exit</th>
+                    <th class="pb-1 pr-3 text-left font-medium">Duration</th>
+                    <th class="pb-1 text-left font-medium">State</th>
+                  </tr>
+                </thead>
+                <tbody>${sessRows}</tbody>
+              </table>
+            </div>
+          </div>
+        `;
       }
     </script>
   </body>

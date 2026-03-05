@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import os
 
 from app.api.routes import router
+from app.api.live_routes import router as live_router
 from app.core.logging import setup_logging, get_logger
 
 setup_logging()
@@ -15,7 +16,33 @@ logger = get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("api_starting")
+    # Create live stream tables if they don't exist
+    try:
+        from app.storage.database import engine
+        from app.storage.live_models import PersonIdentity, PersonSession
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        existing = inspector.get_table_names()
+        if "person_identities" not in existing or "person_sessions" not in existing:
+            from app.storage.database import Base
+            # Import live models so Base knows about them
+            import app.storage.live_models  # noqa: F401
+            Base.metadata.create_all(bind=engine, tables=[
+                PersonIdentity.__table__,
+                PersonSession.__table__,
+            ])
+            logger.info("live_tables_created")
+    except Exception as e:
+        logger.warning("live_tables_init_failed", error=str(e))
     yield
+    # Graceful shutdown: stop live stream if running
+    try:
+        from app.vision.live_stream_processor import LiveStreamProcessor
+        proc = LiveStreamProcessor.get_instance()
+        if proc.is_running:
+            proc.stop()
+    except Exception:
+        pass
     logger.info("api_shutdown")
 
 
@@ -35,6 +62,7 @@ app.add_middleware(
 
 # API routes
 app.include_router(router, prefix="/api/v1")
+app.include_router(live_router, prefix="/api/v1")
 
 # Serve static UI — mount at /ui, and root redirects there
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "static")

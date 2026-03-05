@@ -95,6 +95,27 @@ class Settings(BaseSettings):
     video_input_path: str = Field(..., alias="VIDEO_INPUT_PATH")
     camera_id: str = Field(..., alias="CAMERA_ID")
 
+    # ── Live RTSP stream settings ─────────────────────────────────────────────
+
+    # RTSP stream URL — set in .env as RTSP_URL=rtsp://user:pass@host/stream
+    rtsp_url: str = Field("", alias="RTSP_URL")
+
+    # Frames per second to sample from live stream for detection (1-5 recommended)
+    live_sample_fps: int = Field(2, alias="LIVE_SAMPLE_FPS")
+
+    # Seconds of inactivity before a person is considered to have exited
+    live_exit_timeout_seconds: int = Field(8, alias="LIVE_EXIT_TIMEOUT_SECONDS")
+
+    # Cosine similarity threshold for matching a new detection to a known person
+    # 0.75 = same clothing, reliably same person in same scene
+    live_reid_threshold: float = Field(0.72, alias="LIVE_REID_THRESHOLD")
+
+    # Directory to save live keyframe crops
+    live_crops_path: str = Field("/data/live_crops", alias="LIVE_CROPS_PATH")
+
+    # Max JPEG quality for MJPEG stream (lower = less bandwidth)
+    live_stream_jpeg_quality: int = Field(75, alias="LIVE_STREAM_JPEG_QUALITY")
+
     @property
     def database_url(self) -> str:
         return (

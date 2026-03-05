@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -92,6 +92,35 @@ def ask(body: AskRequest, db: Session = Depends(get_db)):
         question=body.question,
         answer=result["answer"],
         sources=result["sources"],
+    )
+
+
+@router.post("/ask-stream")
+def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
+    """
+    Streaming version of /ask. Returns a Server-Sent Events stream.
+    Each event is: data: {"token": "..."} or data: {"done": true, "sources": [...]}
+    Fast-path queries (plate, count, presence, behaviour) return immediately
+    without calling the LLM at all.
+    """
+    engine = QAEngine(db)
+
+    def generate():
+        yield from engine.stream_ask(
+            question=body.question,
+            video_filename=body.video_filename,
+            camera_id=body.camera_id,
+            min_second=body.min_second,
+            max_second=body.max_second,
+        )
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+        },
     )
 
 

@@ -2,19 +2,19 @@ QA_SYSTEM_PROMPT = """
 You are a security analyst answering questions about video footage.
 
 You will be given a set of TIMESTAMPED CAPTIONS from a security camera.
-Each caption is a static snapshot — it describes what was visible at that exact moment.
+Each caption is a static snapshot -- it describes what was visible at that exact moment.
 
 CRITICAL REASONING INSTRUCTION:
 Actions, movement, and events are NOT visible within a single caption.
 You MUST reason across the sequence of captions to answer questions:
 
-- "Did a car enter?" → Check if a vehicle is absent in early captions but present in later ones
-- "What was the person doing?" → Track the same person across multiple captions and note position changes
-- "Did anything leave?" → Check if something present early is absent later
-- "How long was X there?" → Find first and last caption where X appears
+- "Did a car enter?" -> Check if a vehicle is absent in early captions but present in later ones
+- "What was the person doing?" -> Track the same person across multiple captions and note position changes
+- "Did anything leave?" -> Check if something present early is absent later
+- "How long was X there?" -> Find first and last caption where X appears
 
 Do NOT say "no action was observed" just because individual captions say ACTIONS: None observed.
-That means the frame was static — it does NOT mean nothing happened in the video.
+That means the frame was static -- it does NOT mean nothing happened in the video.
 The movement happened BETWEEN frames. Your job is to infer it.
 
 Be specific. Reference timestamps when stating what happened.
@@ -34,70 +34,82 @@ Answer by reasoning across the captions above. Reference specific timestamps.
 """
 
 
-# ── Phase 6A/6B/7A: Detection-aware QA prompts (upgraded with semantic context) ──
+# -- Phase 6A/6B/7A: Detection-aware QA prompts (temporal-aware) --
 
 QA_DETECTION_SYSTEM_PROMPT = """
 You are a security analyst answering questions about surveillance video footage.
 
-You have FOUR sources of information, presented in order from most semantic to most raw:
+You have FIVE sources of information, presented in order from most focused to most raw:
 
-1. SEMANTIC MEMORY GRAPH — knowledge graph nodes extracted from the video.
-   Each node is a confirmed fact: identity, behaviour, relationship, scene event.
-   Use this first — it directly answers "who", "what behaviour", "what scene".
+1. FOCUSED TRACK CONTEXT -- the most relevant physical objects retrieved for this query.
+   Each block shows ONE track's complete timeline: memory facts, then per-second events.
+   Format:
+     TRACK #N (CLASS) MM:SS-MM:SS (Xs) [video.mp4] | attributes | retrieved: reason
+       [MEM:BEHAVIOUR] Person #N behaviour: loitering. ...
+       [MEM:MOTION]    Person #N motion: running, sudden_stop at 00:32. ...
+       Timeline:
+         MM:SS  enters       -- desc
+         MM:SS  walking      -- Person is walking (left to right).
+         MM:SS  sudden_stop  -- Person stopped abruptly.
+         MM:SS  exits        -- Person leaves after Xs.
+   THIS IS YOUR PRIMARY SOURCE. Answer temporal questions from here.
+   For "did X happen after Y?" look at the Timeline of the same track.
+   Both events will be present if they occurred on the same physical object.
 
-2. VIDEO TIMELINE — per-second event spine for the video.
-   Format: MM:SS  event_type   object track#  — detail
-   Use this for "what happened at X time?" and temporal ordering questions.
+2. SEMANTIC MEMORY GRAPH -- all knowledge graph nodes for involved videos.
+   Supplements source 1 with broader context (scene events, relationships).
 
-3. BEHAVIOUR ANALYSIS — per-track semantic labels from TemporalAnalyzer.
-   Fields: behaviour=<label>, motion=<dominant_state>, motion_events=[...], notes="..."
-   BEHAVIOUR LABELS you will see:
-     loitering        → person in limited area > 60s with no destination
-     patrolling       → person crossing multiple areas repeatedly
-     stationary       → person standing/sitting in one spot
-     running          → high displacement between frames
-     sudden_stop      → was moving then stopped abruptly
-     fall_detected    → bounding box flipped from upright to horizontal — HIGH PRIORITY
-     passing_through  → brief visit < 30s
-     frequent_entry   → entered/exited multiple times
-     parked           → vehicle stationary > 2 min
-     waiting          → vehicle stopped 30–120s
-   MOTION EVENTS: fall_proxy, sudden_stop, direction_change — with timestamps
-   Use these directly to answer: "was anyone loitering?", "did anyone fall?",
-   "was anyone running?", "what was the person doing?"
+3. VIDEO TIMELINE -- full per-second event spine. Use for timestamp precision.
 
-4. RAW DETECTION EVENTS — chronological ENTRY/EXIT/DWELL rows with attributes.
-   Format: [video @ start-end] TYPE: description track #N (duration: Xs, conf: Y%)
-           [behaviour=X, motion=Y, motion_events=[...], notes="..."]
-   Use for precise timestamps, confidence, and track ID confirmation.
+4. BEHAVIOUR ANALYSIS -- per-track semantic labels from TemporalAnalyzer.
+   BEHAVIOUR LABELS: loitering, patrolling, stationary, running, sudden_stop,
+   fall_detected, passing_through, frequent_entry, parked, waiting
+   MOTION EVENTS: fall_proxy, sudden_stop, direction_change -- with exact timestamps
+
+5. RAW DETECTION EVENTS -- chronological ENTRY/EXIT/DWELL rows with attributes.
 
 HOW TO ANSWER:
-- ALWAYS check source 1 (memory graph) first — it already summarises key facts.
-- For behaviour questions → use source 3 (BEHAVIOUR ANALYSIS) directly.
-  Do NOT guess from duration — use the explicit behaviour= label.
-- For "what happened at time X?" → use source 2 (VIDEO TIMELINE).
-- For identity → use attributes (clothing, gender, visible_text like "SECURITY").
-- For counting → count unique track IDs for that class.
-- For safety events (fall, fight_proxy) → surface them prominently regardless of question.
-- Always reference specific track IDs and timestamps.
-- Use phrases like "the system classified this as loitering" not "the person was loitering"
-  — be precise about what is machine-detected vs inferred.
+- TEMPORAL SEQUENCE queries ("did X happen after Y?", "then", "followed by"):
+  -> Find the relevant track in source 1. The Timeline section shows events in order.
+  -> Confirm sequence: first event timestamp < second event timestamp on same track.
+  -> Quote the exact timeline entries as evidence.
+
+- BEHAVIOUR queries ("was anyone loitering/running/falling?"):
+  -> Check source 1 [MEM:BEHAVIOUR] nodes first.
+  -> Confirm with source 4 BEHAVIOUR ANALYSIS: behaviour= label.
+  -> Do NOT guess from duration -- use the explicit label.
+
+- IDENTITY queries ("who was there?", "what car?"):
+  -> Source 1 attribute_summary (clothing, plate, color).
+  -> Source 2 memory graph identity nodes.
+
+- COUNTING ("how many people?"):
+  -> Count unique track IDs for that class across all sources.
+
+- SAFETY events (fall_detected, fight_proxy):
+  -> Surface prominently regardless of the question asked.
+  -> Quote the exact timestamp from source 1 or source 3.
+
+Always reference specific track IDs and timestamps.
+Use "the system classified this as X" for machine-detected labels.
 """.strip()
 
 QA_DETECTION_USER_TEMPLATE = """
-VIDEO SUMMARY (narrative):
+VIDEO SUMMARY (narrative overview):
 --- SUMMARY ---
 {summary}
 --- END SUMMARY ---
 
-STRUCTURED CONTEXT (semantic memory + timeline + behaviour + raw detections):
+FULL CONTEXT (focused tracks + memory graph + timeline + behaviour + raw events):
 --- CONTEXT ---
 {events}
 --- END CONTEXT ---
 
 Question: {question}
 
-Answer using ALL sources above. Prioritise semantic memory and behaviour labels
-for behavioural questions. Prioritise timeline for temporal questions.
-Reference specific track IDs, timestamps, and behaviour labels in your answer.
+Instructions:
+- For temporal/sequence questions: use the FOCUSED TRACK CONTEXT (first section).
+  The track Timeline shows events in order -- confirm sequence from it directly.
+- For behaviour questions: use [MEM:BEHAVIOUR] nodes and BEHAVIOUR ANALYSIS.
+- Always cite track IDs and timestamps. Quote timeline entries as evidence.
 """

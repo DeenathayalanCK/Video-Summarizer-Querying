@@ -109,7 +109,7 @@ class MemoryGraphBuilder:
                 start_second=t_in,
                 end_second=t_out,
                 confidence=ev.best_confidence or 0.5,
-                metadata={"object_class": obj, "attributes": id_parts},
+                node_meta={"object_class": obj, "attributes": id_parts},
             ))
 
             # ── Plate number node (vehicles only) ────────────────────────────
@@ -130,7 +130,7 @@ class MemoryGraphBuilder:
                         start_second=t_in,
                         end_second=t_out,
                         confidence=0.75,  # OCR from low-res crop — moderate confidence
-                        metadata={"plate_number": plate_num, "object_class": obj},
+                        node_meta={"plate_number": plate_num, "object_class": obj},
                     ))
 
             # ── Behaviour node ────────────────────────────────────────────────
@@ -153,7 +153,7 @@ class MemoryGraphBuilder:
                     start_second=t_in,
                     end_second=t_out,
                     confidence=0.85,
-                    metadata={"behaviour": behaviour, "appearance_count": appc},
+                    node_meta={"behaviour": behaviour, "appearance_count": appc},
                 ))
 
             # ── Motion node ───────────────────────────────────────────────────
@@ -176,7 +176,7 @@ class MemoryGraphBuilder:
                     start_second=t_in,
                     end_second=t_out,
                     confidence=0.80,
-                    metadata={"dominant_state": dom_state, "motion_events": mevts},
+                    node_meta={"dominant_state": dom_state, "motion_events": mevts},
                 ))
 
             # ── Per motion-event timeline nodes ───────────────────────────────
@@ -213,7 +213,7 @@ class MemoryGraphBuilder:
                     start_second=sec,
                     end_second=sec,
                     confidence=conf,
-                    metadata={"motion_event": mev},
+                    node_meta={"motion_event": mev},
                 ))
 
         # ── Scene-level nodes from VideoTimeline ──────────────────────────────
@@ -240,7 +240,7 @@ class MemoryGraphBuilder:
                     start_second=s,
                     end_second=e,
                     confidence=se.get("confidence", 0.5),
-                    metadata={"event_type": et, "track_ids": tids},
+                    node_meta={"event_type": et, "track_ids": tids},
                 ))
 
         # ── Co-presence relationship nodes ────────────────────────────────────
@@ -266,7 +266,7 @@ class MemoryGraphBuilder:
                         start_second=overlap_start,
                         end_second=overlap_end,
                         confidence=0.95,
-                        metadata={
+                        node_meta={
                             "track_a": a.track_id, "class_a": a.object_class,
                             "track_b": b.track_id, "class_b": b.object_class,
                             "overlap_seconds": round(overlap, 1),
@@ -303,7 +303,7 @@ class MemoryGraphBuilder:
                 start_second=nd.start_second,
                 end_second=nd.end_second,
                 confidence=nd.confidence,
-                node_meta=nd.metadata,
+                node_meta=nd.node_meta,
             )
             self.db.add(row)
 

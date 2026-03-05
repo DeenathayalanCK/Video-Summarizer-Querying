@@ -241,6 +241,23 @@ class AttributeProcessor:
 
             self.db.flush()
 
+            # ── Enrich rag_text with motion semantics before re-embedding ─────
+            # Phase 6A wrote motion_clause into initial rag_text, but Phase 6B
+            # overwrote rag_text with attribute-only text that drops motion events.
+            # Re-append motion_summary so the embedding captures fall/stop/walking.
+            for ev in track_events_for_this_track:
+                ms = (ev.attributes or {}).get("motion_summary", {})
+                mevts = ms.get("motion_events", [])
+                dom   = ms.get("dominant_state", "")
+                if ev.rag_text and (mevts or (dom and dom not in ("stationary", "unknown", ""))):
+                    motion_parts = []
+                    if dom and dom not in ("stationary", "unknown", ""):
+                        motion_parts.append(f"predominantly {dom}")
+                    if mevts:
+                        motion_parts.append("; ".join(mevts[:3]))
+                    ev.rag_text = ev.rag_text.rstrip(".") + ". Motion: " + ", ".join(motion_parts) + "."
+                    flag_modified(ev, "rag_text")
+
             # ── Re-embed all TrackEvents for this track ────────────────────────
             for ev in track_events_for_this_track:
                 self._reembed_track_event(ev)

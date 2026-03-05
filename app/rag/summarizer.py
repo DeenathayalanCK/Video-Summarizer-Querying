@@ -182,6 +182,7 @@ class VideoSummarizer:
             "system": TRACK_SUMMARY_SYSTEM_PROMPT,
             "prompt": user_message,
             "stream": False,
+            "options": {"num_ctx": 8192, "num_predict": 800},
         }
 
         response = requests.post(
@@ -269,6 +270,7 @@ class VideoSummarizer:
             "system": SUMMARY_SYSTEM_PROMPT,
             "prompt": user_message,
             "stream": False,
+            "options": {"num_ctx": 8192, "num_predict": 800},
         }
 
         response = requests.post(

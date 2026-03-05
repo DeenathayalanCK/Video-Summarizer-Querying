@@ -1370,44 +1370,105 @@
         toggleProof(card);
       }
 
-      // ── Ask ────────────────────────────────────────────────────────────────────────
+      // ── Ask (streaming) ─────────────────────────────────────────────────────────
 
       async function doAsk() {
         const q = document.getElementById("ask-input").value.trim();
         if (!q) return;
         const video = document.getElementById("ask-video-filter").value;
         const el = document.getElementById("ask-results");
-        el.innerHTML = spinner();
+
+        // Show streaming answer box immediately
+        el.innerHTML = `
+          <div class="glass rounded-xl p-5 mb-4 fade-in" id="ask-answer-box">
+            <div class="flex items-center gap-2 mb-3">
+              <i data-lucide="sparkles" class="w-4 h-4 text-indigo-400"></i>
+              <span class="text-sm font-medium">Answer</span>
+              <span id="ask-status-badge" class="ml-auto text-xs text-gray-500 animate-pulse">thinking...</span>
+            </div>
+            <div id="ask-answer-text" class="prose-surveillance text-sm text-gray-200 leading-relaxed whitespace-pre-wrap"></div>
+          </div>
+          <div id="ask-sources-area"></div>
+        `;
+        lucide.createIcons();
+
+        const body = { question: q };
+        if (video) body.video_filename = video;
+
+        let fullAnswer = "";
+        let isFastPath = false;
 
         try {
-          const body = { question: q };
-          if (video) body.video_filename = video;
-          const data = await apiFetch("/ask", {
+          const resp = await fetch(API + "/ask-stream", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
           });
 
-          el.innerHTML = `
-                  <div class="glass rounded-xl p-5 mb-4 fade-in">
-                    <div class="flex items-center gap-2 mb-3">
-                      <i data-lucide="sparkles" class="w-4 h-4 text-indigo-400"></i>
-                      <span class="text-sm font-medium">Answer</span>
-                    </div>
-                    <div class="prose-surveillance text-sm text-gray-200 leading-relaxed">${renderMarkdown(data.answer)}</div>
-                  </div>
-                  ${
-                    data.sources.length
-                      ? `
-                    <div class="mb-2 text-xs text-gray-500">Based on ${data.sources.length} source moments:</div>
+          if (!resp.ok) {
+            const err = await resp
+              .json()
+              .catch(() => ({ detail: resp.statusText }));
+            throw new Error(err.detail || resp.statusText);
+          }
+
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop(); // keep incomplete line
+
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              let msg;
+              try {
+                msg = JSON.parse(line.slice(6));
+              } catch {
+                continue;
+              }
+
+              if (msg.token !== undefined) {
+                fullAnswer += msg.token;
+                document.getElementById("ask-answer-text").textContent =
+                  fullAnswer;
+              }
+
+              if (msg.done) {
+                isFastPath = msg.fast_path || false;
+                const badge = document.getElementById("ask-status-badge");
+                if (isFastPath) {
+                  badge.textContent = "⚡ instant";
+                  badge.className =
+                    "ml-auto text-xs text-emerald-400 font-medium";
+                } else {
+                  badge.textContent = "✓ done";
+                  badge.className = "ml-auto text-xs text-gray-500";
+                }
+
+                // Render markdown now that answer is complete
+                document.getElementById("ask-answer-text").innerHTML =
+                  renderMarkdown(fullAnswer);
+
+                // Render sources
+                const sources = msg.sources || [];
+                const sourcesEl = document.getElementById("ask-sources-area");
+                if (sources.length) {
+                  sourcesEl.innerHTML = `
+                    <div class="mb-2 text-xs text-gray-500">Based on ${sources.length} source moment(s):</div>
                     <div class="grid gap-3">
-                      ${data.sources.map((r) => resultCard(r)).join("")}
-                    </div>
-                  `
-                      : ""
-                  }
-                `;
-          lucide.createIcons();
+                      ${sources.map((r) => resultCard(r)).join("")}
+                    </div>`;
+                  lucide.createIcons();
+                }
+              }
+            }
+          }
         } catch (e) {
           el.innerHTML = errorBox(e.message);
         }

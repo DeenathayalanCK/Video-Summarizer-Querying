@@ -78,6 +78,22 @@ def health():
 
 # ── Q&A ────────────────────────────────────────────────────────────────────────
 
+@router.get("/mode")
+def get_mode():
+    """
+    Returns whether the system is in live (RTSP) or batch (file) mode.
+    Used by the UI to adapt the sidebar and show/hide tabs.
+    """
+    from app.core.config import get_settings
+    s = get_settings()
+    return {
+        "mode":   "live" if s.is_rtsp else "batch",
+        "source": s.video_input_path,
+        "camera_id": s.camera_id,
+        "live_window_minutes": s.live_window_minutes if s.is_rtsp else None,
+    }
+
+
 @router.post("/ask", response_model=AskResponse)
 def ask(body: AskRequest, db: Session = Depends(get_db)):
     engine = QAEngine(db)
@@ -268,21 +284,46 @@ def list_videos(db: Session = Depends(get_db)):
     # Union of all known video filenames
     all_videos = set(det_counts) | set(caption_counts) | set(statuses)
 
-    return {
-        "videos": [
-            {
-                "video_filename": vf,
-                "detection_count": det_counts.get(vf, 0),
-                "unique_tracks": track_counts.get(vf, 0),
-                "caption_count": caption_counts.get(vf, 0),
-                "has_summary": vf in summaries,
-                "processing_status": statuses.get(vf, "unknown"),
-                "pipeline": "detection" if (vf in det_counts or vf in statuses) else "caption" if vf in caption_counts else "unknown",
-                "phase_6b_completed": phase_6b.get(vf, False),
-            }
-            for vf in sorted(all_videos)
-        ]
-    }
+    from app.core.config import get_settings
+    is_live = get_settings().is_rtsp
+
+    def _parse_window_label(vf: str) -> dict:
+        """For live window keys, extract human-readable display label."""
+        if not is_live:
+            return {"display_label": vf, "is_window": False}
+        try:
+            parts = vf.rsplit("_", 2)
+            if len(parts) == 3:
+                from datetime import datetime
+                dt = datetime.strptime(parts[1] + parts[2], "%Y%m%d%H%M")
+                from app.core.config import get_settings as _gs
+                mins = _gs().live_window_minutes
+                end_dt = dt.replace(minute=dt.minute + mins) if dt.minute + mins < 60 else dt
+                label = f"{dt.strftime('%b %d  %H:%M')} – {(dt.minute+mins)%60:02d}"
+                return {"display_label": label, "is_window": True,
+                        "window_start": dt.isoformat()}
+        except Exception:
+            pass
+        return {"display_label": vf, "is_window": False}
+
+    videos_list = []
+    for vf in sorted(all_videos, reverse=is_live):  # newest first in live mode
+        info = _parse_window_label(vf)
+        videos_list.append({
+            "video_filename":    vf,
+            "display_label":     info["display_label"],
+            "is_window":         info.get("is_window", False),
+            "window_start":      info.get("window_start"),
+            "detection_count":   det_counts.get(vf, 0),
+            "unique_tracks":     track_counts.get(vf, 0),
+            "caption_count":     caption_counts.get(vf, 0),
+            "has_summary":       vf in summaries,
+            "processing_status": statuses.get(vf, "unknown"),
+            "pipeline":          "detection" if (vf in det_counts or vf in statuses)
+                                 else "caption" if vf in caption_counts else "unknown",
+            "phase_6b_completed": phase_6b.get(vf, False),
+        })
+    return {"videos": videos_list, "mode": "live" if is_live else "batch"}
 
 
 # ── Phase 6A: Track timeline ───────────────────────────────────────────────────

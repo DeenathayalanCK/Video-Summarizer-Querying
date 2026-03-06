@@ -50,7 +50,7 @@ def start_stream():
     if not ok:
         raise HTTPException(
             status_code=400,
-            detail="Failed to start stream. Check RTSP_URL in .env.")
+            detail="Failed to start stream. Check VIDEO_INPUT_PATH in .env.")
     return {"status": "started"}
 
 

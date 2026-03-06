@@ -16,6 +16,8 @@ logger = get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("api_starting")
+    from app.core.config import get_settings
+    settings = get_settings()
     # Create live stream tables if they don't exist
     try:
         from app.storage.database import engine
@@ -34,8 +36,29 @@ async def lifespan(app: FastAPI):
             logger.info("live_tables_created")
     except Exception as e:
         logger.warning("live_tables_init_failed", error=str(e))
+
+    # Auto-start live stream + window manager if VIDEO_INPUT_PATH is RTSP
+    if settings.is_rtsp:
+        try:
+            from app.vision.window_manager import WindowManager
+            WindowManager.get_instance().start()
+            logger.info("window_manager_auto_started")
+        except Exception as e:
+            logger.warning("window_manager_start_failed", error=str(e))
+        try:
+            from app.vision.live_stream_processor import LiveStreamProcessor
+            LiveStreamProcessor.get_instance().start()
+            logger.info("live_stream_auto_started")
+        except Exception as e:
+            logger.warning("live_stream_start_failed", error=str(e))
+
     yield
     # Graceful shutdown: stop live stream if running
+    try:
+        from app.vision.window_manager import WindowManager
+        WindowManager.get_instance().stop()
+    except Exception:
+        pass
     try:
         from app.vision.live_stream_processor import LiveStreamProcessor
         proc = LiveStreamProcessor.get_instance()

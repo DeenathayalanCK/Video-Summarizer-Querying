@@ -95,10 +95,12 @@ class Settings(BaseSettings):
     video_input_path: str = Field(..., alias="VIDEO_INPUT_PATH")
     camera_id: str = Field(..., alias="CAMERA_ID")
 
+    # ── Live window settings ───────────────────────────────────────────────────
+    live_window_minutes: int = Field(5, alias="LIVE_WINDOW_MINUTES")
+
     # ── Live RTSP stream settings ─────────────────────────────────────────────
 
-    # RTSP stream URL — set in .env as RTSP_URL=rtsp://user:pass@host/stream
-    rtsp_url: str = Field("", alias="RTSP_URL")
+    # Source URL — set VIDEO_INPUT_PATH=rtsp://... in .env for live mode
 
     # Frames per second to sample from live stream for detection (1-5 recommended)
     live_sample_fps: int = Field(2, alias="LIVE_SAMPLE_FPS")
@@ -110,8 +112,6 @@ class Settings(BaseSettings):
     # 0.75 = same clothing, reliably same person in same scene
     live_reid_threshold: float = Field(0.72, alias="LIVE_REID_THRESHOLD")
 
-    # Directory to save live keyframe crops
-    live_crops_path: str = Field("/data/live_crops", alias="LIVE_CROPS_PATH")
 
     # Max JPEG quality for MJPEG stream (lower = less bandwidth)
     live_stream_jpeg_quality: int = Field(75, alias="LIVE_STREAM_JPEG_QUALITY")
@@ -123,6 +123,16 @@ class Settings(BaseSettings):
             f"{self.db_password}@{self.db_host}:"
             f"{self.db_port}/{self.db_name}"
         )
+
+    @property
+    def is_rtsp(self) -> bool:
+        """True when VIDEO_INPUT_PATH is an RTSP stream URL."""
+        return self.video_input_path.lower().startswith("rtsp://")
+
+    @property
+    def live_crops_path(self) -> str:
+        """Crops directory — matches Docker volume mount live_crops:/data/live_crops"""
+        return "/data/live_crops"
 
     class Config:
         env_file = ".env"

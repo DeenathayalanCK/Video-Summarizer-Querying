@@ -188,7 +188,7 @@ class VideoSummarizer:
         response = requests.post(
             f"{self.settings.ollama_host}/api/generate",
             json=payload,
-            timeout=600,
+            timeout=self.settings.caption_timeout_seconds,
         )
         response.raise_for_status()
         summary_text = response.json()["response"]
@@ -276,7 +276,7 @@ class VideoSummarizer:
         response = requests.post(
             f"{self.settings.ollama_host}/api/generate",
             json=payload,
-            timeout=600,
+            timeout=self.settings.caption_timeout_seconds,
         )
         response.raise_for_status()
         summary_text = response.json()["response"]

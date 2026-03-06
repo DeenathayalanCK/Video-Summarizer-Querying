@@ -70,13 +70,18 @@ class WindowManager:
                          interval_minutes=self.settings.live_window_minutes)
 
     def stop(self):
-        """Stop the rotation loop. Closes current window."""
+        """Stop the rotation loop. Closes current window and queues its post-processing."""
         self._stop_evt.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=15)
+        final_key = None
         with self._lock:
             if self._current_key:
+                final_key = self._current_key
                 self._close_window(self._current_key)
+        # Trigger post-processing for the final (possibly partial) window
+        if final_key:
+            self._queue_postprocess(final_key)
         self.logger.info("window_manager_stopped")
 
     @property
@@ -217,10 +222,31 @@ class WindowManager:
             try:
                 from app.rag.summarizer import VideoSummarizer
                 summarizer = VideoSummarizer(db)
-                summarizer.summarize(key)
+                summarizer.summarize_from_tracks(key)
                 self.logger.info("window_summary_done", key=key)
             except Exception as e:
                 self.logger.warning("window_summary_failed", key=key, error=str(e))
+
+            # 6. Update ProcessingStatus with actual detection counts
+            try:
+                from app.storage.models import TrackEvent, DetectedObject, ProcessingStatus
+                n_tracks = db.query(TrackEvent).filter(
+                    TrackEvent.video_filename == key,
+                    TrackEvent.event_type == "entry",
+                ).count()
+                n_detections = db.query(DetectedObject).filter(
+                    DetectedObject.video_filename == key,
+                ).count()
+                ps = db.query(ProcessingStatus).filter(
+                    ProcessingStatus.video_filename == key).first()
+                if ps:
+                    ps.scenes_detected = n_tracks
+                    ps.scenes_captioned = n_detections
+                    ps.phase_6b_completed = True
+                    ps.phase_6b_tracks_attributed = n_tracks
+                    db.commit()
+            except Exception as e:
+                self.logger.warning("window_status_counts_failed", key=key, error=str(e))
 
             self._mark_status(key, "completed")
             self.logger.info("window_postprocess_complete", key=key)

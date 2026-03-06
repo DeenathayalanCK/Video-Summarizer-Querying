@@ -43,6 +43,14 @@ _log = get_logger()
 @router.post("/start")
 def start_stream():
     """Start the RTSP live stream processor."""
+    # Ensure WindowManager rotation loop is running so every 5-min window
+    # triggers attribute extraction, temporal analysis, and summarization.
+    from app.vision.window_manager import WindowManager
+    wm = WindowManager.get_instance()
+    if not (wm._thread and wm._thread.is_alive()):
+        wm.start()
+        _log.info("window_manager_started_via_live_start")
+
     proc = LiveStreamProcessor.get_instance()
     if proc.is_running:
         return {"status": "already_running"}
@@ -59,6 +67,13 @@ def stop_stream():
     """Stop the RTSP live stream processor."""
     proc = LiveStreamProcessor.get_instance()
     proc.stop()
+
+    # Stop WindowManager: closes the current window and queues its
+    # post-processing (attributes → temporal → summary).
+    from app.vision.window_manager import WindowManager
+    wm = WindowManager.get_instance()
+    if wm._thread and wm._thread.is_alive():
+        wm.stop()
     return {"status": "stopped"}
 
 

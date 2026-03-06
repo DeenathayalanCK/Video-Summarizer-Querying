@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from typing import Optional
 import os
@@ -44,6 +44,7 @@ class AskResponse(BaseModel):
 
 
 class SummaryResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     video_filename: str
     camera_id: str
     summary: str

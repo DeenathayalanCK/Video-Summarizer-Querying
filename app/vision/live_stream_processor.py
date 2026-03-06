@@ -611,11 +611,11 @@ class LiveStreamProcessor:
                 track_id=det.track_id,
                 object_class=det.object_class,
                 confidence=det.confidence,
-                frame_second=0.0,
-                x1=det.x1 / w, y1=det.y1 / h,
-                x2=det.x2 / w, y2=det.y2 / h,
+                frame_second_offset=0.0,
+                bbox_x1=det.x1 / w, bbox_y1=det.y1 / h,
+                bbox_x2=det.x2 / w, bbox_y2=det.y2 / h,
                 crop_path=track.best_crop_path,
-                quadrant="center",
+                frame_quadrant="center",
                 rag_text=f"Live detection: {track.person_label} in {window_key}",
             )
             db.add(do)

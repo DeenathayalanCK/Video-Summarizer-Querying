@@ -66,6 +66,7 @@ services:
       - .env
     volumes:
       - ./app:/app/app
+      - live_crops:/data/live_crops
       - ./data:/app/data
       - ./static:/app/static
       - ./config:/app/config
@@ -77,3 +78,4 @@ services:
 volumes:
   postgres_data:
   ollama_data:
+  live_crops:

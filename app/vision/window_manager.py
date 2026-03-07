@@ -175,75 +175,98 @@ class WindowManager:
     def _run_postprocess(self, key: str):
         """
         Sequential post-processing for a closed window.
-        Runs: attribute extraction → temporal analysis → summary generation.
-        All existing pipeline functions are reused unchanged.
+        Pipeline: attributes → temporal → timeline → memory → activity → reembed → summary
+        Each step updates ProcessingStatus.current_step so the UI can show live progress.
         """
+        import time
         from app.storage.database import SessionLocal
         db = SessionLocal()
         try:
+            # Brief delay to let LiveStreamProcessor flush final frame writes
+            time.sleep(3)
             self.logger.info("window_postprocess_start", key=key)
+            self._set_step(key, "🧠 Attributes", db)
 
-            # 1. Attribute extraction (Phase 6B)
+            # ── STEP 1: Attribute extraction ─────────────────────────────────
             try:
                 from app.detection.attribute_processor import AttributeProcessor
-                proc = AttributeProcessor(db)
-                proc.run(key)
-                self.logger.info("window_attrs_done", key=key)
+                n_attr = AttributeProcessor(db).run(key)
+                self.logger.info("window_attrs_done", key=key, tracks=n_attr)
             except Exception as e:
                 self.logger.warning("window_attrs_failed", key=key, error=str(e))
 
-            # 2. Temporal analysis
+            # ── STEP 2: Temporal analysis (with MotionSample reconstruction) ─
+            self._set_step(key, "📊 Temporal", db)
             try:
-                from app.detection.temporal_analyzer import TemporalAnalyzer
-                ta = TemporalAnalyzer(db)
-                ta.run(key)
+                self._run_temporal(key, db)
                 self.logger.info("window_temporal_done", key=key)
             except Exception as e:
                 self.logger.warning("window_temporal_failed", key=key, error=str(e))
 
-            # 3. Memory graph
+            # ── STEP 3: Timeline builder ─────────────────────────────────────
+            self._set_step(key, "📅 Timeline", db)
+            try:
+                from app.detection.timeline_builder import TimelineBuilder
+                from app.core.config import get_settings
+                TimelineBuilder(db).build(key, get_settings().camera_id)
+                self.logger.info("window_timeline_done", key=key)
+            except Exception as e:
+                self.logger.warning("window_timeline_failed", key=key, error=str(e))
+
+            # ── STEP 4: Memory graph ─────────────────────────────────────────
+            self._set_step(key, "🕸 Memory", db)
             try:
                 from app.storage.memory_graph import MemoryGraphBuilder
-                mgb = MemoryGraphBuilder(db)
-                mgb.build(key)
+                from app.core.config import get_settings
+                MemoryGraphBuilder(db).build(key, get_settings().camera_id)
                 self.logger.info("window_memory_graph_done", key=key)
             except Exception as e:
                 self.logger.warning("window_memory_graph_failed", key=key, error=str(e))
 
-            # 4. Activity captions (minicpm-v one-liner per track)
+            # ── STEP 5: Activity captions (minicpm-v per track) ──────────────
+            self._set_step(key, "🎯 Activity AI", db)
             try:
                 from app.detection.activity_detector import run_activity_captions_for_window
-                n = run_activity_captions_for_window(key, db)
-                self.logger.info("window_activity_captions_done", key=key, captioned=n)
+                n_cap = run_activity_captions_for_window(key, db)
+                self.logger.info("window_activity_captions_done", key=key, captioned=n_cap)
             except Exception as e:
                 self.logger.warning("window_activity_captions_failed", key=key, error=str(e))
 
-            # 5. Summary generation
+            # ── STEP 6: Re-embed updated rag_text ───────────────────────────
+            self._set_step(key, "🔢 Embeddings", db)
+            try:
+                self._run_reembed(key, db)
+                self.logger.info("window_reembed_done", key=key)
+            except Exception as e:
+                self.logger.warning("window_reembed_failed", key=key, error=str(e))
+
+            # ── STEP 7: Summary ──────────────────────────────────────────────
+            self._set_step(key, "📝 Summary", db)
             try:
                 from app.rag.summarizer import VideoSummarizer
-                summarizer = VideoSummarizer(db)
-                summarizer.summarize_from_tracks(key)
+                VideoSummarizer(db).summarize_from_tracks(key)
                 self.logger.info("window_summary_done", key=key)
             except Exception as e:
                 self.logger.warning("window_summary_failed", key=key, error=str(e))
 
-            # 6. Update ProcessingStatus with actual detection counts
+            # ── Final: write counts to ProcessingStatus ──────────────────────
             try:
                 from app.storage.models import TrackEvent, DetectedObject, ProcessingStatus
                 n_tracks = db.query(TrackEvent).filter(
                     TrackEvent.video_filename == key,
                     TrackEvent.event_type == "entry",
                 ).count()
-                n_detections = db.query(DetectedObject).filter(
+                n_dets = db.query(DetectedObject).filter(
                     DetectedObject.video_filename == key,
                 ).count()
                 ps = db.query(ProcessingStatus).filter(
                     ProcessingStatus.video_filename == key).first()
                 if ps:
-                    ps.scenes_detected = n_tracks
-                    ps.scenes_captioned = n_detections
+                    ps.scenes_detected   = n_tracks
+                    ps.scenes_captioned  = n_dets
                     ps.phase_6b_completed = True
                     ps.phase_6b_tracks_attributed = n_tracks
+                    ps.current_step = None   # clear step label
                     db.commit()
             except Exception as e:
                 self.logger.warning("window_status_counts_failed", key=key, error=str(e))
@@ -256,6 +279,140 @@ class WindowManager:
             self._mark_status(key, "failed")
         finally:
             db.close()
+
+    def _set_step(self, key: str, label: str, db):
+        """Update ProcessingStatus.current_step for live pipeline progress display."""
+        try:
+            from app.storage.models import ProcessingStatus
+            ps = db.query(ProcessingStatus).filter(
+                ProcessingStatus.video_filename == key).first()
+            if ps:
+                ps.current_step = label
+                db.commit()
+            self.logger.info("pipeline_step", key=key, step=label)
+        except Exception:
+            pass
+
+    def _run_temporal(self, key: str, db):
+        """
+        Reconstruct TrackState with MotionSamples from DB, then run TemporalAnalyzer.
+        Fixes:
+          1. motion_samples was empty → _analyse_motion always "stationary"
+          2. all_seconds with epoch values → normalise to offset-from-first
+          3. Quadrant fallback overridden by real displacement data
+        """
+        from app.storage.models import TrackEvent, DetectedObject
+        from app.detection.temporal_analyzer import TemporalAnalyzer
+        from app.detection.event_generator import TrackState, MotionSample
+        from sqlalchemy.orm.attributes import flag_modified
+
+        entry_events = (
+            db.query(TrackEvent)
+            .filter(TrackEvent.video_filename == key,
+                    TrackEvent.event_type == "entry")
+            .all()
+        )
+        if not entry_events:
+            return
+
+        all_dets = (
+            db.query(DetectedObject)
+            .filter(DetectedObject.video_filename == key)
+            .order_by(DetectedObject.frame_second_offset)
+            .all()
+        )
+
+        det_by_track = {}
+        samples_by_track = {}
+        seconds_by_track = {}
+
+        for d in all_dets:
+            if d.track_id is None:
+                continue
+            det_by_track.setdefault(d.track_id, []).append(d)
+            seconds_by_track.setdefault(d.track_id, []).append(d.frame_second_offset)
+            cx = (d.bbox_x1 + d.bbox_x2) / 2.0
+            cy = (d.bbox_y1 + d.bbox_y2) / 2.0
+            w  = abs(d.bbox_x2 - d.bbox_x1)
+            h  = abs(d.bbox_y2 - d.bbox_y1)
+            samples_by_track.setdefault(d.track_id, []).append(
+                MotionSample(second=d.frame_second_offset, cx=cx, cy=cy, w=w, h=h))
+
+        track_states = {}
+        for ev in entry_events:
+            epoch_secs   = sorted(seconds_by_track.get(ev.track_id) or
+                                  [ev.first_seen_second, ev.last_seen_second])
+            motion_samps = sorted(samples_by_track.get(ev.track_id, []),
+                                  key=lambda m: m.second)
+            t0           = epoch_secs[0]
+            rel_secs     = [s - t0 for s in epoch_secs]
+            rel_samples  = [MotionSample(second=m.second - t0,
+                                         cx=m.cx, cy=m.cy, w=m.w, h=m.h)
+                            for m in motion_samps]
+            duration = ev.last_seen_second - ev.first_seen_second
+
+            track_states[ev.track_id] = TrackState(
+                track_id=ev.track_id,
+                object_class=ev.object_class,
+                first_seen=0.0,
+                last_seen=round(duration, 1),
+                frame_count=max(2, len(rel_secs)),
+                best_second=0.0,
+                best_confidence=ev.best_confidence or 0.5,
+                best_crop_path=ev.best_crop_path,
+                all_seconds=rel_secs,
+                motion_samples=rel_samples,
+            )
+
+        behaviours = TemporalAnalyzer().analyze(track_states, det_by_track)
+        beh_map    = {b.track_id: b for b in behaviours}
+
+        all_events = db.query(TrackEvent).filter(
+            TrackEvent.video_filename == key).all()
+        for ev in all_events:
+            beh = beh_map.get(ev.track_id)
+            if beh:
+                attrs = dict(ev.attributes or {})
+                attrs["temporal"] = beh.to_dict()
+                ev.attributes = attrs
+                flag_modified(ev, "attributes")
+        db.commit()
+        self.logger.info("window_temporal_written", key=key, tracks=len(behaviours))
+
+    def _run_reembed(self, key: str, db):
+        """Re-embed all TrackEvent rag_text after attribute extraction rewrites it."""
+        try:
+            from app.storage.models import TrackEvent, TrackEventEmbedding
+            from app.rag.embedder import OllamaEmbedder
+            embedder = OllamaEmbedder()
+            events = db.query(TrackEvent).filter(
+                TrackEvent.video_filename == key,
+                TrackEvent.rag_text.isnot(None),
+            ).all()
+            count = 0
+            for ev in events:
+                try:
+                    vec = embedder.embed(ev.rag_text)
+                    if vec is None:
+                        continue
+                    emb = db.query(TrackEventEmbedding).filter(
+                        TrackEventEmbedding.track_event_id == ev.id).first()
+                    if emb:
+                        emb.embedding = vec
+                    else:
+                        from app.core.config import get_settings
+                        db.add(TrackEventEmbedding(
+                            track_event_id=ev.id,
+                            embedding=vec,
+                            model_name=get_settings().embedding_model,
+                        ))
+                    count += 1
+                except Exception:
+                    pass
+            db.commit()
+            self.logger.info("window_reembed_done", key=key, count=count)
+        except Exception as e:
+            self.logger.warning("window_reembed_failed", key=key, error=str(e))
 
     # ── DB helpers ────────────────────────────────────────────────────────────
 

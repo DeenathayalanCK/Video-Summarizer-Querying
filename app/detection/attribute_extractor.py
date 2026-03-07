@@ -140,11 +140,18 @@ class BaseAttributeExtractor:
             },
         }
 
+        # Attribute extraction uses small crops with num_predict=150, so a 90s
+        # timeout is more than enough.  The full caption_timeout_seconds (300s)
+        # is too long — holding an inactive DB connection for 300 s causes the
+        # PostgreSQL server to close it, and the subsequent flush() fails with
+        # OperationalError, aborting all remaining tracks in the window.
+        attr_timeout = min(self.settings.caption_timeout_seconds, 90)
+
         try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
-                timeout=self.settings.caption_timeout_seconds,
+                timeout=attr_timeout,
             )
             response.raise_for_status()
             return response.json().get("response", "")
@@ -152,7 +159,7 @@ class BaseAttributeExtractor:
             self.logger.warning(
                 "attribute_extraction_timeout",
                 model=self.model,
-                timeout=self.settings.caption_timeout_seconds,
+                timeout=attr_timeout,
             )
             return None
         except Exception as e:

@@ -262,6 +262,13 @@
                 >
                   🗂 History
                 </button>
+                <button
+                  onclick="liveSubTab('actlog')"
+                  id="live-sub-actlog"
+                  class="px-3 py-1.5 text-xs font-medium rounded-t text-gray-500 hover:text-gray-300"
+                >
+                  🎯 Activity Log
+                </button>
               </div>
 
               <!-- STREAM sub-tab -->
@@ -314,6 +321,7 @@
                       src=""
                       alt="Live stream"
                       onerror="this.style.opacity = '0.3'"
+                      onload="this.style.opacity = '1'"
                     />
                     <div
                       id="live-offline-msg"
@@ -435,6 +443,60 @@
                 </div>
               </div>
               <!-- end live-subtab-history -->
+
+              <!-- ACTIVITY LOG sub-tab -->
+              <div id="live-subtab-actlog" class="hidden">
+                <div class="flex items-center justify-between mb-3">
+                  <div>
+                    <span class="text-sm font-medium text-gray-300"
+                      >🎯 Activity Log</span
+                    >
+                    <span class="text-xs text-gray-600 ml-2"
+                      >Validated sustained activities (≥60s)</span
+                    >
+                  </div>
+                  <button
+                    onclick="_refreshActivityLog()"
+                    class="text-xs text-indigo-400 hover:text-indigo-300"
+                  >
+                    ↻ Refresh
+                  </button>
+                </div>
+
+                <!-- Live now section -->
+                <div class="mb-4">
+                  <div
+                    class="text-xs text-gray-500 uppercase tracking-wider mb-2"
+                  >
+                    Active Now
+                  </div>
+                  <div id="actlog-live" class="space-y-2">
+                    <div class="text-xs text-gray-600">Loading…</div>
+                  </div>
+                </div>
+
+                <!-- Historical snapshots by window -->
+                <div>
+                  <div class="flex items-center justify-between mb-2">
+                    <div class="text-xs text-gray-500 uppercase tracking-wider">
+                      Historical (from closed windows)
+                    </div>
+                    <select
+                      id="actlog-window-select"
+                      onchange="_loadWindowActivitySnaps()"
+                      class="text-xs bg-gray-800 border border-gray-700 rounded px-2 py-1 text-gray-300"
+                    >
+                      <option value="">Select window…</option>
+                    </select>
+                  </div>
+                  <div id="actlog-history" class="space-y-2">
+                    <div class="text-xs text-gray-600">
+                      Select a window above to load its activity log
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <!-- end live-subtab-actlog -->
             </div>
           </div>
 
@@ -2245,7 +2307,6 @@
         if (!attrs) return "";
         const cls = attrs.object_class || "";
         const parts = [];
-        // visible_text: text printed on clothing/badges e.g. "SECURITY", "POLICE"
         const visibleText =
           attrs.visible_text &&
           !["none", "unknown", ""].includes(attrs.visible_text)
@@ -2283,15 +2344,47 @@
           else if (attrs.plate_visible) parts.push("plate visible");
         }
 
-        if (!parts.length && !visibleText) return "";
         let html = "";
-        // Visible text (e.g. "SECURITY") shown as a prominent badge first
         if (visibleText) {
           html += `<div class="text-xs font-bold text-orange-300 bg-orange-500/10 border border-orange-500/30 rounded px-1.5 py-0.5 mt-1.5 inline-block tracking-wide">${visibleText}</div>`;
         }
         if (parts.length) {
           html += `<div class="text-xs text-yellow-400 mt-1 break-words leading-relaxed">${parts.join(" · ")}</div>`;
         }
+
+        // Activity caption (from minicpm-v post-processing)
+        if (attrs.activity_caption) {
+          html += `<div class="mt-1 px-1.5 py-0.5 rounded text-xs bg-indigo-900/30 border border-indigo-500/20 text-indigo-300">
+            🎯 ${attrs.activity_caption}</div>`;
+        } else if (attrs.activity_hint && attrs.activity_hint !== "present") {
+          html += `<div class="mt-1 text-xs text-indigo-400">🎯 ${attrs.activity_hint}</div>`;
+        }
+
+        // Objects detected nearby
+        const objs = attrs.objects_nearby;
+        if (objs && objs.length) {
+          const ICONS = {
+            laptop: "💻",
+            cell_phone: "📱",
+            keyboard: "⌨️",
+            tv_monitor: "🖥",
+            mouse: "🖱",
+            book: "📖",
+            cup: "☕",
+            remote: "📡",
+            clock: "🕐",
+          };
+          html +=
+            `<div class="mt-1 flex flex-wrap gap-1">` +
+            objs
+              .map(
+                (o) =>
+                  `<span class="text-xs px-1 py-0.5 rounded bg-gray-700/60 border border-gray-600 text-gray-300">${ICONS[o] || "📦"} ${o.replace("_", " ")}</span>`,
+              )
+              .join("") +
+            `</div>`;
+        }
+
         return html;
       }
 
@@ -2837,6 +2930,20 @@
       const TERMINAL_STATES = new Set(["completed", "skipped", "failed"]);
       let _pollTimer = null;
 
+      // Pipeline steps shown during post_processing
+      const PIPELINE_STEPS = [
+        { key: "attrs", label: "Attributes", icon: "🧠" },
+        { key: "temporal", label: "Temporal", icon: "📊" },
+        { key: "timeline", label: "Timeline", icon: "📅" },
+        { key: "memory", label: "Memory graph", icon: "🕸" },
+        { key: "activity", label: "Activity AI", icon: "🎯" },
+        { key: "embed", label: "Embeddings", icon: "🔢" },
+        { key: "summary", label: "Summary", icon: "📝" },
+      ];
+
+      // Track which steps have completed per window (key → Set of done steps)
+      const _pipelineStepsDone = {};
+
       async function pollPipelineStatus() {
         try {
           const data = await apiFetch("/status");
@@ -2844,74 +2951,112 @@
           if (!el) return;
 
           if (!data.statuses.length) {
-            el.innerHTML = '<div class="text-gray-600">No jobs yet</div>';
-            // Keep polling — pipeline may not have registered jobs yet
-            // Do NOT return here before the allDone check (old bug)
+            el.innerHTML =
+              '<div class="text-gray-600 text-xs">No jobs yet</div>';
           } else {
-            const colors = {
-              completed: "text-green-400",
-              running: "text-yellow-400",
-              failed: "text-red-400",
-              pending: "text-gray-500",
-              skipped: "text-gray-600",
+            const STATUS_META = {
+              live: { color: "text-red-400", icon: "●", animate: true },
+              post_processing: {
+                color: "text-yellow-400",
+                icon: "⟳",
+                animate: true,
+              },
+              running: { color: "text-yellow-400", icon: "▶", animate: true },
+              completed: {
+                color: "text-emerald-400",
+                icon: "✓",
+                animate: false,
+              },
+              failed: { color: "text-red-500", icon: "✗", animate: false },
+              pending: { color: "text-gray-500", icon: "○", animate: false },
             };
 
             el.innerHTML = data.statuses
               .map((s) => {
-                const color = colors[s.status] || "text-gray-400";
-                const pct =
-                  s.progress_pct != null ? " " + s.progress_pct + "%" : "";
-                const errMsg = s.last_error
-                  ? s.last_error.slice(0, 50) + "..."
-                  : "";
-                const err = s.last_error
-                  ? '<div class="text-red-500 truncate" title="' +
-                    s.last_error +
-                    '">⚠ ' +
-                    errMsg +
-                    "</div>"
-                  : "";
+                const m = STATUS_META[s.status] || STATUS_META.pending;
+                const isLiveWindow =
+                  s.status === "live" || s.status === "post_processing";
+                const shortName =
+                  s.video_filename.length > 18
+                    ? "…" + s.video_filename.slice(-15)
+                    : s.video_filename;
+
+                // Progress bar for running batch jobs
                 const bar =
                   s.status === "running" && s.progress_pct != null
-                    ? '<div class="w-full bg-gray-800 rounded-full h-1 mt-1"><div class="bg-yellow-400 h-1 rounded-full" style="width:' +
-                      s.progress_pct +
-                      '%"></div></div>'
+                    ? `<div class="w-full bg-gray-800 rounded-full h-0.5 mt-1.5">
+                    <div class="bg-yellow-400 h-0.5 rounded-full transition-all" style="width:${s.progress_pct}%"></div>
+                   </div>`
                     : "";
-                return (
-                  '<div class="glass rounded-lg p-2">' +
-                  '<div class="flex justify-between items-center">' +
-                  '<span class="truncate font-medium" style="max-width:120px" title="' +
-                  s.video_filename +
-                  '">' +
-                  s.video_filename +
-                  "</span>" +
-                  '<span class="' +
-                  color +
-                  ' font-mono">' +
-                  s.status +
-                  pct +
-                  "</span>" +
-                  "</div>" +
-                  '<div class="text-gray-600 mt-0.5">' +
-                  s.scenes_captioned +
-                  "/" +
-                  s.scenes_detected +
-                  " scenes" +
-                  (s.current_second != null
-                    ? " @ " + s.current_second.toFixed(1) + "s"
-                    : "") +
-                  "</div>" +
-                  bar +
-                  err +
-                  "</div>"
-                );
+
+                // Current step pill — live pipeline progress from window_manager._set_step
+                const stepPill = s.current_step
+                  ? `<div class="mt-1.5 px-2 py-0.5 rounded bg-yellow-500/15 border border-yellow-500/30 text-yellow-300 text-xs font-semibold animate-pulse inline-block">${s.current_step}</div>`
+                  : s.status === "post_processing"
+                    ? `<div class="mt-1 text-xs text-yellow-600 animate-pulse">⟳ post-processing…</div>`
+                    : "";
+
+                // Completed step icons (inferred from what we know is done)
+                let stepRow = "";
+                if (
+                  s.status === "post_processing" ||
+                  s.status === "completed"
+                ) {
+                  const STEPS = ["🧠", "📊", "📅", "🕸", "🎯", "🔢", "📝"];
+                  const LABELS = [
+                    "Attributes",
+                    "Temporal",
+                    "Timeline",
+                    "Memory",
+                    "Activity AI",
+                    "Embeddings",
+                    "Summary",
+                  ];
+                  const done_count = s.phase_6b_completed
+                    ? s.status === "completed"
+                      ? 7
+                      : 1
+                    : 0;
+                  stepRow =
+                    `<div class="flex gap-0.5 mt-1.5 flex-wrap">` +
+                    STEPS.map((icon, i) => {
+                      const done = i < done_count;
+                      return `<span title="${LABELS[i]}" class="text-xs ${done ? "opacity-100" : "opacity-20"}">${icon}</span>`;
+                    }).join("") +
+                    `</div>`;
+                }
+
+                // Detection/track counts
+                const countStr =
+                  s.scenes_detected > 0
+                    ? `<span class="text-indigo-400">${s.scenes_detected}</span> tracks`
+                    : s.scenes_captioned > 0
+                      ? `${s.scenes_captioned} scenes`
+                      : "";
+
+                const errBox = s.last_error
+                  ? `<div class="text-red-500 text-xs truncate mt-1" title="${s.last_error}">⚠ ${s.last_error.slice(0, 45)}…</div>`
+                  : "";
+
+                const attrs6b = s.phase_6b_completed
+                  ? `<span class="text-yellow-600 ml-1">✓ attrs</span>`
+                  : "";
+
+                return `<div class="glass rounded-lg p-2.5 text-xs">
+                <div class="flex items-center justify-between gap-1">
+                  <span class="truncate font-medium text-gray-200" title="${s.video_filename}">${shortName}</span>
+                  <span class="${m.color} font-mono shrink-0 ${m.animate ? "animate-pulse" : ""}">${m.icon} ${s.status}</span>
+                </div>
+                <div class="text-gray-600 mt-0.5 flex gap-2 flex-wrap">
+                  ${countStr}${attrs6b}
+                  ${s.phase_6b_tracks_attributed ? `<span class="text-yellow-700">${s.phase_6b_tracks_attributed} attr'd</span>` : ""}
+                </div>
+                ${stepPill}${stepRow}${bar}${errBox}
+              </div>`;
               })
               .join("");
           }
 
-          // FIXED: only stop when jobs exist AND every one is terminal.
-          // hasJobs guard prevents [].every() = true from killing the timer
-          // before the pipeline has even started registering work.
           const hasJobs = data.statuses.length > 0;
           const allDone =
             hasJobs &&
@@ -2921,7 +3066,7 @@
             _pollTimer = null;
           }
         } catch (e) {
-          /* non-critical — network blip, keep polling */
+          /* non-critical */
         }
       }
 
@@ -3033,6 +3178,26 @@
             (st.running
               ? `&nbsp;·&nbsp;<span class="text-emerald-500">● live</span>`
               : `&nbsp;·&nbsp;<span class="text-gray-600">● offline</span>`);
+
+          // Refresh activity log live section if that sub-tab is active
+          if (
+            !document
+              .getElementById("live-subtab-actlog")
+              .classList.contains("hidden")
+          ) {
+            try {
+              const actData = await apiFetch("/live/activity-log");
+              const liveEl = document.getElementById("actlog-live");
+              if (liveEl) {
+                const log = actData.activity_log || [];
+                liveEl.innerHTML = log.length
+                  ? log.map((item) => _activityCard(item, true)).join("")
+                  : '<div class="text-xs text-gray-600">No active persons with detected activities right now</div>';
+              }
+            } catch (e) {
+              /* ignore */
+            }
+          }
         } catch (e) {
           console.warn("live poll error", e);
         }
@@ -3121,6 +3286,22 @@
                 <div class="text-xs text-gray-600 mt-0.5">
                   in ${_fmtTime(p.entry_time)}
                 </div>
+                ${
+                  p.activity_hint && p.activity_hint !== "present"
+                    ? `
+                <div class="mt-1 px-1.5 py-0.5 rounded text-xs bg-indigo-900/40 border border-indigo-500/30 text-indigo-300 font-medium">
+                  🎯 ${p.activity_hint}
+                </div>`
+                    : ""
+                }
+                ${
+                  p.objects_nearby && p.objects_nearby.length
+                    ? `
+                <div class="mt-0.5 text-xs text-gray-600">
+                  📦 ${p.objects_nearby.join(", ")}
+                </div>`
+                    : ""
+                }
               </div>
             </div>
           `;
@@ -3181,20 +3362,139 @@
       // ══════════════════════════════════════════════════════════════════════
 
       function liveSubTab(name) {
-        ["stream", "history"].forEach((t) => {
+        ["stream", "history", "actlog"].forEach((t) => {
           document
             .getElementById("live-subtab-" + t)
             .classList.toggle("hidden", t !== name);
           const btn = document.getElementById("live-sub-" + t);
-          if (t === name) {
-            btn.className =
-              "px-3 py-1.5 text-xs font-medium rounded-t text-white bg-gray-700";
-          } else {
-            btn.className =
-              "px-3 py-1.5 text-xs font-medium rounded-t text-gray-500 hover:text-gray-300";
+          if (btn) {
+            if (t === name) {
+              btn.className =
+                "px-3 py-1.5 text-xs font-medium rounded-t text-white bg-gray-700";
+            } else {
+              btn.className =
+                "px-3 py-1.5 text-xs font-medium rounded-t text-gray-500 hover:text-gray-300";
+            }
           }
         });
         if (name === "history") loadLiveHistory();
+        if (name === "actlog") _refreshActivityLog();
+      }
+
+      // ── Activity Log functions ─────────────────────────────────────────────
+
+      function _activityCard(item, isLive) {
+        const ACTIVITY_ICONS = {
+          "working on laptop": "💻",
+          "working on laptop, using phone": "💻📱",
+          "using phone": "📱",
+          "reading / taking notes": "📖",
+          "looking at screen": "🖥",
+          "at desk": "🪑",
+        };
+        const icon = ACTIVITY_ICONS[item.activity] || "🎯";
+        const cropUrl = item.best_crop_path
+          ? `${API}/crop?path=${encodeURIComponent(item.best_crop_path)}`
+          : null;
+        const durStr = _fmtDur(item.duration_so_far || item.duration_seconds);
+        const timeStr = item.snapshot_time
+          ? new Date(item.snapshot_time).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            })
+          : item.last_seen
+            ? _fmtTime(item.last_seen)
+            : "";
+        const objs = (item.objects_nearby || []).join(", ");
+        return `
+          <div class="glass rounded-xl p-3 flex gap-3 items-start ${isLive ? "border border-indigo-500/30" : ""}">
+            ${cropUrl ? `<img src="${cropUrl}" class="w-12 h-14 object-cover rounded-lg bg-gray-800 shrink-0" onerror="this.style.display='none'"/>` : `<div class="w-12 h-14 bg-gray-800 rounded-lg shrink-0 flex items-center justify-center text-2xl">👤</div>`}
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 mb-0.5">
+                <span class="font-bold text-sm text-indigo-300">${item.person_label}</span>
+                ${isLive ? '<span class="text-xs text-red-400 animate-pulse">● NOW</span>' : ""}
+              </div>
+              <div class="text-base font-semibold text-white">${icon} ${item.activity}</div>
+              ${objs ? `<div class="text-xs text-gray-500 mt-0.5">Objects: ${objs}</div>` : ""}
+              <div class="flex gap-3 mt-1 text-xs text-gray-600">
+                <span>⏱ ${durStr}</span>
+                ${timeStr ? `<span>🕐 ${timeStr}</span>` : ""}
+                ${item.window ? `<span class="truncate max-w-xs">📁 ${item.window.split("_").slice(-1)[0] || item.window}</span>` : ""}
+              </div>
+            </div>
+          </div>`;
+      }
+
+      async function _refreshActivityLog() {
+        // Live now — from /live/activity-log (no duration filter, active persons only)
+        const liveEl = document.getElementById("actlog-live");
+        try {
+          const data = await apiFetch("/live/activity-log");
+          const log = data.activity_log || [];
+          if (!log.length) {
+            liveEl.innerHTML =
+              '<div class="text-xs text-gray-600">No active persons with detected activities right now</div>';
+          } else {
+            liveEl.innerHTML = log
+              .map((item) => _activityCard(item, true))
+              .join("");
+          }
+        } catch (e) {
+          liveEl.innerHTML = `<div class="text-xs text-red-500">${e.message}</div>`;
+        }
+
+        // Populate window select for historical snapshots
+        const sel = document.getElementById("actlog-window-select");
+        try {
+          const vids = await apiFetch("/videos");
+          const completed = (vids.videos || []).filter(
+            (v) =>
+              v.processing_status === "completed" ||
+              v.processing_status === "post_processing",
+          );
+          // Keep current selection
+          const cur = sel.value;
+          sel.innerHTML =
+            '<option value="">Select window…</option>' +
+            completed
+              .map(
+                (v) =>
+                  `<option value="${v.video_filename}" ${v.video_filename === cur ? "selected" : ""}>${v.display_label || v.video_filename}</option>`,
+              )
+              .join("");
+          if (cur) _loadWindowActivitySnaps();
+        } catch (e) {
+          /* ignore */
+        }
+      }
+
+      async function _loadWindowActivitySnaps() {
+        const win = document.getElementById("actlog-window-select").value;
+        const el = document.getElementById("actlog-history");
+        if (!win) {
+          el.innerHTML =
+            '<div class="text-xs text-gray-600">Select a window</div>';
+          return;
+        }
+        el.innerHTML =
+          '<div class="text-xs text-gray-600 animate-pulse">Loading…</div>';
+        try {
+          const data = await apiFetch(
+            `/activity-snapshots/${encodeURIComponent(win)}?min_duration=60`,
+          );
+          const snaps = data.snapshots || [];
+          if (!snaps.length) {
+            el.innerHTML =
+              '<div class="text-xs text-gray-600">No sustained activities recorded in this window. Activities must last ≥60s to appear here.</div>';
+          } else {
+            el.innerHTML =
+              `<div class="text-xs text-gray-500 mb-2">${snaps.length} validated activity log(s) from this window</div>` +
+              snaps.map((s) => _activityCard(s, false)).join("");
+          }
+        } catch (e) {
+          el.innerHTML = `<div class="text-xs text-red-500">${e.message}</div>`;
+        }
       }
 
       async function loadLiveHistory() {
@@ -3455,6 +3755,51 @@
               </table>
             </div>
           </div>
+
+          <!-- Activity snapshots -->
+          ${
+            p.activity_snapshots && p.activity_snapshots.length
+              ? `
+          <div class="mt-4">
+            <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">
+              🎯 Validated Activities (sustained ≥60s)
+            </div>
+            <div class="space-y-2 overflow-y-auto" style="max-height:180px">
+              ${p.activity_snapshots
+                .map((s) => {
+                  const ICONS = {
+                    laptop: "💻",
+                    cell_phone: "📱",
+                    keyboard: "⌨️",
+                    tv_monitor: "🖥",
+                    mouse: "🖱",
+                    book: "📖",
+                    cup: "☕",
+                  };
+                  const objs = (s.objects_nearby || [])
+                    .map((o) => `${ICONS[o] || "📦"}${o.replace("_", " ")}`)
+                    .join(", ");
+                  const t = s.snapshot_time
+                    ? new Date(s.snapshot_time).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : "";
+                  return `<div class="flex items-center gap-3 px-2 py-1.5 rounded-lg bg-gray-800/40 border border-gray-700 text-xs">
+                  <div class="shrink-0 text-base">${s.activity?.includes("laptop") ? "💻" : s.activity?.includes("phone") ? "📱" : "🎯"}</div>
+                  <div class="flex-1 min-w-0">
+                    <div class="text-white font-medium">${s.activity}</div>
+                    ${objs ? `<div class="text-gray-500">${objs}</div>` : ""}
+                  </div>
+                  <div class="text-gray-600 shrink-0">${t}</div>
+                  <div class="text-gray-700 shrink-0">${_fmtDur(s.duration_so_far)}</div>
+                </div>`;
+                })
+                .join("")}
+            </div>
+          </div>`
+              : ""
+          }
         `;
       }
     </script>

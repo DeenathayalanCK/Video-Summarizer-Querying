@@ -109,6 +109,10 @@ class ProcessingStatus(Base):
     phase_6b_completed = Column(Boolean, nullable=False, default=False)
     phase_6b_tracks_attributed = Column(Integer, nullable=True)
 
+    # Live pipeline step currently running (e.g. "🧠 Attributes", "📊 Temporal")
+    # Set to None when pipeline completes. Read by /status endpoint for UI progress.
+    current_step = Column(String(50), nullable=True)
+
 
 # ── Phase 6A: Detection + Tracking tables ──────────────────────────────────────
 

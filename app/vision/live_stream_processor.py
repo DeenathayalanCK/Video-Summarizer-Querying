@@ -191,6 +191,9 @@ class LiveStreamProcessor:
                         "best_crop_path": t.best_crop_path,
                         "active":         age <= timeout,
                         "duration_seconds": (t.last_seen - t.first_seen).total_seconds(),
+                        # Activity detection results (populated every 5 frames)
+                        "objects_nearby": list(t.objects_nearby) if hasattr(t, "objects_nearby") else [],
+                        "activity_hint":  t.activity_hint if hasattr(t, "activity_hint") else "present",
                     })
             return sorted(result, key=lambda x: x["person_label"])
 
@@ -309,8 +312,8 @@ class LiveStreamProcessor:
                     if crop is not None and crop.size > 0:
                         path = self._save_crop(crop, existing.person_label, wall_time)
                         if path:
-                            # Stage 1 activity: detect objects in crop
-                            objs, hint = self.activity.detect_objects_in_crop(crop)
+                            # Stage 1 activity: detect objects in context crop
+                            objs, hint = self.activity.detect_on_context(frame, bbox_now)
                             with self._tracks_lock:
                                 existing.best_crop_path  = path
                                 existing.best_confidence = det.confidence
@@ -333,9 +336,9 @@ class LiveStreamProcessor:
                         crop, f"tmp{det.track_id}", wall_time)
                     if crop_path:
                         embedding = self.reid.embed_crop(crop_path)
-                # Initial activity detection on crop
+                # Initial activity detection on context crop
                 _init_objects, _init_hint = (
-                    self.activity.detect_objects_in_crop(crop)
+                    self.activity.detect_on_context(frame, bbox_now)
                     if crop is not None and crop.size > 0
                     else ([], "present")
                 )

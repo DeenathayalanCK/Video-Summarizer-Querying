@@ -535,6 +535,7 @@ def _status_to_response(s) -> dict:
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
         "phase_6b_completed": bool(s.phase_6b_completed),
         "phase_6b_tracks_attributed": s.phase_6b_tracks_attributed,
+        "current_step": getattr(s, "current_step", None),
     }
 
 
@@ -970,3 +971,105 @@ def build_memory_graph(video_filename: str, db: Session = Depends(get_db)):
 def trigger_reindex(db: Session = Depends(get_db)):
     count = CaptionIndexer(db).index_all_unindexed()
     return {"indexed": count}
+
+@router.get("/activity-snapshots/{video_filename}")
+def get_activity_snapshots(
+    video_filename: str,
+    person_label: Optional[str] = Query(None),
+    min_duration: float = Query(60.0, description="Min sustained seconds before showing"),
+    db: Session = Depends(get_db),
+):
+    """
+    Return validated sustained activity events for a video window.
+    Only shows activities that lasted >= min_duration seconds (default 60s).
+    Each snapshot was written every 60s by LiveStreamProcessor._maybe_write_activity_snapshot
+    when a person had phone/laptop/screen detected for that full minute.
+
+    Answers queries like: "who was using a laptop between 10:00 and 11:00?"
+    """
+    from app.storage.models import TrackEvent
+
+    snaps = (
+        db.query(TrackEvent)
+        .filter(
+            TrackEvent.video_filename == video_filename,
+            TrackEvent.event_type == "activity_snapshot",
+        )
+        .order_by(TrackEvent.first_seen_second)
+        .all()
+    )
+
+    if person_label:
+        snaps = [s for s in snaps if
+                 (s.attributes or {}).get("person_label") == person_label]
+
+    results = []
+    for s in snaps:
+        attrs = s.attributes or {}
+        dur_so_far = attrs.get("duration_so_far", 0)
+        if dur_so_far < min_duration:
+            continue
+        results.append({
+            "track_id":      s.track_id,
+            "person_label":  attrs.get("person_label", f"track#{s.track_id}"),
+            "activity":      attrs.get("activity", "unknown"),
+            "objects_nearby": attrs.get("objects_nearby", []),
+            "snapshot_time": attrs.get("snapshot_time"),
+            "duration_so_far": dur_so_far,
+            "best_crop_path": s.best_crop_path,
+            "window":        video_filename,
+        })
+
+    return {
+        "video_filename": video_filename,
+        "count": len(results),
+        "min_duration_filter": min_duration,
+        "snapshots": results,
+    }
+
+
+@router.get("/objects-in-frame/{video_filename}")
+def get_objects_in_frame(
+    video_filename: str,
+    track_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Return objects detected near each person in a video window.
+    Reads objects_nearby from TrackEvent.attributes — populated live by
+    ActivityDetector.detect_on_context() every 5 frames.
+    Groups by track_id showing what objects were seen near each person.
+    Used in Detections tab and by factual Ask queries.
+    """
+    from app.storage.models import TrackEvent
+
+    q = db.query(TrackEvent).filter(
+        TrackEvent.video_filename == video_filename,
+        TrackEvent.event_type == "entry",
+    )
+    if track_id is not None:
+        q = q.filter(TrackEvent.track_id == track_id)
+    events = q.order_by(TrackEvent.first_seen_second).all()
+
+    results = []
+    for ev in events:
+        attrs = ev.attributes or {}
+        objs = attrs.get("objects_nearby") or []
+        activity = attrs.get("activity_hint") or attrs.get("activity_caption") or "present"
+        results.append({
+            "track_id":      ev.track_id,
+            "person_label":  attrs.get("person_label", f"track#{ev.track_id}"),
+            "objects_nearby": objs,
+            "activity":      activity,
+            "activity_caption": attrs.get("activity_caption"),
+            "best_crop_path": ev.best_crop_path,
+            "first_seen":    ev.first_seen_second,
+            "last_seen":     ev.last_seen_second,
+            "duration":      ev.duration_seconds,
+        })
+
+    return {
+        "video_filename": video_filename,
+        "count": len(results),
+        "tracks": results,
+    }

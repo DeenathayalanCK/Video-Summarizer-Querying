@@ -149,6 +149,33 @@ def active_persons():
     return {"persons": active, "count": len(active)}
 
 
+@router.get("/activity-log")
+def live_activity_log():
+    """
+    Current activity of all active persons — phone, laptop, screen detections.
+    Only returns persons with a non-trivial activity_hint.
+    Updated every 5 frames (~2.5s at 2 FPS) by ActivityDetector.detect_on_context().
+    """
+    proc = LiveStreamProcessor.get_instance()
+    tracks = proc.get_active_tracks()
+    log = []
+    for t in tracks:
+        if not t.get("active"):
+            continue
+        hint = t.get("activity_hint", "present")
+        objs = t.get("objects_nearby", [])
+        if hint and hint != "present":
+            log.append({
+                "person_label":  t["person_label"],
+                "activity":      hint,
+                "objects_nearby": objs,
+                "duration_seconds": t.get("duration_seconds", 0),
+                "best_crop_path": t.get("best_crop_path"),
+                "last_seen":     t.get("last_seen"),
+            })
+    return {"activity_log": log, "count": len(log)}
+
+
 @router.get("/sessions")
 def sessions_today(db: Session = Depends(get_db)):
     """All sessions from today, newest first."""
@@ -264,6 +291,31 @@ def person_detail(person_label: str, db: Session = Depends(get_db)):
     from collections import Counter
     state_counts = dict(Counter(states).most_common(5))
 
+    # Activity snapshots for this person across all windows
+    from app.storage.models import TrackEvent
+    person_label_val = identity.person_label
+    snap_rows = (
+        db.query(TrackEvent)
+        .filter(
+            TrackEvent.event_type == "activity_snapshot",
+            TrackEvent.attributes[("person_label")].astext == person_label_val,
+        )
+        .order_by(TrackEvent.first_seen_second.desc())
+        .limit(50)
+        .all()
+    )
+    activity_snaps = [
+        {
+            "activity":      (s.attributes or {}).get("activity"),
+            "objects_nearby": (s.attributes or {}).get("objects_nearby", []),
+            "snapshot_time": (s.attributes or {}).get("snapshot_time"),
+            "duration_so_far": (s.attributes or {}).get("duration_so_far", 0),
+            "window":        s.video_filename,
+        }
+        for s in snap_rows
+        if (s.attributes or {}).get("duration_so_far", 0) >= 60
+    ]
+
     return {
         "person_label":    identity.person_label,
         "total_visits":    identity.total_visits,
@@ -274,6 +326,7 @@ def person_detail(person_label: str, db: Session = Depends(get_db)):
         "avg_duration_seconds": round(avg_dur, 1),
         "state_breakdown": state_counts,
         "sessions":        [_session_to_dict(s) for s in sessions],
+        "activity_snapshots": activity_snaps,
     }
 
 

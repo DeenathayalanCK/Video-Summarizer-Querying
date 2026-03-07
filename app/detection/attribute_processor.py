@@ -17,6 +17,7 @@ Design:
 
 import os
 from typing import Optional
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -106,117 +107,77 @@ class AttributeProcessor:
             all_events_by_track.setdefault(ev.track_id, []).append(ev)
 
         attributed_count = 0
+        # Track IDs already processed — skip duplicate entry events for the same track.
+        # ByteTrack can re-assign the same integer ID within a window, producing
+        # multiple entry rows.  Processing duplicates wastes LLM calls and can
+        # cause re-embed conflicts; skip after the first successful attribution.
+        already_attributed: set = set()
 
         for entry_event in entry_events:
             track_id = entry_event.track_id
             object_class = entry_event.object_class
             crop_path = entry_event.best_crop_path
 
-            if not crop_path or not os.path.exists(crop_path):
+            # Skip duplicate track_ids — already attributed in this run
+            if track_id in already_attributed:
+                continue
+
+            try:
+                if not crop_path or not os.path.exists(crop_path):
+                    self.logger.info(
+                        "attribute_processor_no_crop_skipping",
+                        video=video_filename,
+                        track_id=track_id,
+                        object_class=object_class,
+                        crop_path=crop_path,
+                    )
+                    continue
+
                 self.logger.info(
-                    "attribute_processor_no_crop_skipping",
+                    "attribute_processor_extracting",
                     video=video_filename,
                     track_id=track_id,
                     object_class=object_class,
-                    crop_path=crop_path,
-                )
-                continue
-
-            self.logger.info(
-                "attribute_processor_extracting",
-                video=video_filename,
-                track_id=track_id,
-                object_class=object_class,
-                crop=crop_path,
-            )
-
-            # ── Extract attributes ─────────────────────────────────────────────
-            vehicle_attrs: Optional[VehicleAttributes] = None
-            person_attrs: Optional[PersonAttributes] = None
-            attributes_dict: dict = {}
-            new_rag_text: str = entry_event.rag_text  # fallback = existing
-
-            if object_class in VEHICLE_CLASSES:
-                vehicle_attrs = self.vehicle_extractor.extract(crop_path)
-                attributes_dict = vehicle_attrs.to_dict()
-                attributes_dict["object_class"] = object_class
-
-                new_rag_text = build_vehicle_rag_text(
-                    track_id=track_id,
-                    object_class=object_class,
-                    event_type="entry",
-                    first_seen=entry_event.first_seen_second,
-                    last_seen=entry_event.last_seen_second,
-                    duration=entry_event.duration_seconds,
-                    confidence=entry_event.best_confidence or 0.0,
-                    color=vehicle_attrs.color,
-                    vehicle_type=vehicle_attrs.vehicle_type,
-                    make_estimate=vehicle_attrs.make_estimate,
-                    plate_number=vehicle_attrs.plate_number,
+                    crop=crop_path,
                 )
 
-            elif object_class in PERSON_CLASSES:
-                person_attrs = self.person_extractor.extract(crop_path)
-                attributes_dict = person_attrs.to_dict()
-                attributes_dict["object_class"] = object_class
+                # ── Extract attributes ─────────────────────────────────────────────
+                vehicle_attrs: Optional[VehicleAttributes] = None
+                person_attrs: Optional[PersonAttributes] = None
+                attributes_dict: dict = {}
+                new_rag_text: str = entry_event.rag_text  # fallback = existing
 
-                new_rag_text = build_person_rag_text(
-                    track_id=track_id,
-                    event_type="entry",
-                    first_seen=entry_event.first_seen_second,
-                    last_seen=entry_event.last_seen_second,
-                    duration=entry_event.duration_seconds,
-                    confidence=entry_event.best_confidence or 0.0,
-                    gender_estimate=person_attrs.gender_estimate,
-                    age_estimate=person_attrs.age_estimate,
-                    clothing_top=person_attrs.clothing_top,
-                    clothing_bottom=person_attrs.clothing_bottom,
-                    head_covering=person_attrs.head_covering,
-                    carrying=person_attrs.carrying,
-                    visible_text=person_attrs.visible_text,
-                )
-            else:
-                self.logger.info(
-                    "attribute_processor_unsupported_class",
-                    object_class=object_class,
-                    track_id=track_id,
-                )
-                continue
+                if object_class in VEHICLE_CLASSES:
+                    vehicle_attrs = self.vehicle_extractor.extract(crop_path)
+                    attributes_dict = vehicle_attrs.to_dict()
+                    attributes_dict["object_class"] = object_class
 
-            # ── Write attributes to all TrackEvents for this track_id ──────────
-            track_events_for_this_track = all_events_by_track.get(track_id, [])
-            for ev in track_events_for_this_track:
-                # Merge new attributes into existing JSONB to preserve keys
-                # like "temporal" and "motion_summary" written by earlier pipeline
-                # phases.  Replacing entirely would wipe those values.
-                merged_attrs = dict(ev.attributes or {})
-                merged_attrs.update(attributes_dict)
-                ev.attributes = merged_attrs
-                flag_modified(ev, "attributes")
-
-                # Build event-type-specific rag_text for exit/dwell
-                if ev.event_type != "entry" and object_class in VEHICLE_CLASSES and vehicle_attrs:
-                    ev.rag_text = build_vehicle_rag_text(
+                    new_rag_text = build_vehicle_rag_text(
                         track_id=track_id,
                         object_class=object_class,
-                        event_type=ev.event_type,
-                        first_seen=ev.first_seen_second,
-                        last_seen=ev.last_seen_second,
-                        duration=ev.duration_seconds,
-                        confidence=ev.best_confidence or 0.0,
+                        event_type="entry",
+                        first_seen=entry_event.first_seen_second,
+                        last_seen=entry_event.last_seen_second,
+                        duration=entry_event.duration_seconds,
+                        confidence=entry_event.best_confidence or 0.0,
                         color=vehicle_attrs.color,
                         vehicle_type=vehicle_attrs.vehicle_type,
                         make_estimate=vehicle_attrs.make_estimate,
                         plate_number=vehicle_attrs.plate_number,
                     )
-                elif ev.event_type != "entry" and object_class in PERSON_CLASSES and person_attrs:
-                    ev.rag_text = build_person_rag_text(
+
+                elif object_class in PERSON_CLASSES:
+                    person_attrs = self.person_extractor.extract(crop_path)
+                    attributes_dict = person_attrs.to_dict()
+                    attributes_dict["object_class"] = object_class
+
+                    new_rag_text = build_person_rag_text(
                         track_id=track_id,
-                        event_type=ev.event_type,
-                        first_seen=ev.first_seen_second,
-                        last_seen=ev.last_seen_second,
-                        duration=ev.duration_seconds,
-                        confidence=ev.best_confidence or 0.0,
+                        event_type="entry",
+                        first_seen=entry_event.first_seen_second,
+                        last_seen=entry_event.last_seen_second,
+                        duration=entry_event.duration_seconds,
+                        confidence=entry_event.best_confidence or 0.0,
                         gender_estimate=person_attrs.gender_estimate,
                         age_estimate=person_attrs.age_estimate,
                         clothing_top=person_attrs.clothing_top,
@@ -226,52 +187,127 @@ class AttributeProcessor:
                         visible_text=person_attrs.visible_text,
                     )
                 else:
-                    # Entry event
-                    ev.rag_text = new_rag_text
+                    self.logger.info(
+                        "attribute_processor_unsupported_class",
+                        object_class=object_class,
+                        track_id=track_id,
+                    )
+                    continue
 
-            # ── Write class-specific fields to the best DetectedObject ─────────
-            if vehicle_attrs:
-                self._update_best_detected_object_vehicle(
-                    video_filename, track_id, vehicle_attrs,
+                # ── Write attributes to all TrackEvents for this track_id ──────────
+                track_events_for_this_track = all_events_by_track.get(track_id, [])
+                for ev in track_events_for_this_track:
+                    # Merge new attributes into existing JSONB to preserve keys
+                    # like "temporal" and "motion_summary" written by earlier pipeline
+                    # phases.  Replacing entirely would wipe those values.
+                    merged_attrs = dict(ev.attributes or {})
+                    merged_attrs.update(attributes_dict)
+                    ev.attributes = merged_attrs
+                    flag_modified(ev, "attributes")
+
+                    # Build event-type-specific rag_text for exit/dwell
+                    if ev.event_type != "entry" and object_class in VEHICLE_CLASSES and vehicle_attrs:
+                        ev.rag_text = build_vehicle_rag_text(
+                            track_id=track_id,
+                            object_class=object_class,
+                            event_type=ev.event_type,
+                            first_seen=ev.first_seen_second,
+                            last_seen=ev.last_seen_second,
+                            duration=ev.duration_seconds,
+                            confidence=ev.best_confidence or 0.0,
+                            color=vehicle_attrs.color,
+                            vehicle_type=vehicle_attrs.vehicle_type,
+                            make_estimate=vehicle_attrs.make_estimate,
+                            plate_number=vehicle_attrs.plate_number,
+                        )
+                    elif ev.event_type != "entry" and object_class in PERSON_CLASSES and person_attrs:
+                        ev.rag_text = build_person_rag_text(
+                            track_id=track_id,
+                            event_type=ev.event_type,
+                            first_seen=ev.first_seen_second,
+                            last_seen=ev.last_seen_second,
+                            duration=ev.duration_seconds,
+                            confidence=ev.best_confidence or 0.0,
+                            gender_estimate=person_attrs.gender_estimate,
+                            age_estimate=person_attrs.age_estimate,
+                            clothing_top=person_attrs.clothing_top,
+                            clothing_bottom=person_attrs.clothing_bottom,
+                            head_covering=person_attrs.head_covering,
+                            carrying=person_attrs.carrying,
+                            visible_text=person_attrs.visible_text,
+                        )
+                    else:
+                        # Entry event
+                        ev.rag_text = new_rag_text
+
+                # ── Write class-specific fields to the best DetectedObject ─────────
+                if vehicle_attrs:
+                    self._update_best_detected_object_vehicle(
+                        video_filename, track_id, vehicle_attrs,
+                    )
+                elif person_attrs:
+                    self._update_best_detected_object_person(
+                        video_filename, track_id, person_attrs,
+                    )
+
+                # Keep-alive: the minicpm-v extraction above can take 30-90 s.
+                # If the DB connection was idled out during that time, the flush
+                # below would fail.  A lightweight SELECT 1 forces SQLAlchemy to
+                # validate (and if needed, reconnect) before touching any data.
+                try:
+                    self.db.execute(text("SELECT 1"))
+                except Exception:
+                    self.db.rollback()
+
+                self.db.flush()
+
+                # ── Enrich rag_text with motion semantics before re-embedding ─────
+                # Phase 6A wrote motion_clause into initial rag_text, but Phase 6B
+                # overwrote rag_text with attribute-only text that drops motion events.
+                # Re-append motion_summary so the embedding captures fall/stop/walking.
+                for ev in track_events_for_this_track:
+                    ms = (ev.attributes or {}).get("motion_summary", {})
+                    mevts = ms.get("motion_events", [])
+                    dom   = ms.get("dominant_state", "")
+                    if ev.rag_text and (mevts or (dom and dom not in ("stationary", "unknown", ""))):
+                        motion_parts = []
+                        if dom and dom not in ("stationary", "unknown", ""):
+                            motion_parts.append(f"predominantly {dom}")
+                        if mevts:
+                            motion_parts.append("; ".join(mevts[:3]))
+                        ev.rag_text = ev.rag_text.rstrip(".") + ". Motion: " + ", ".join(motion_parts) + "."
+                        flag_modified(ev, "rag_text")
+
+                # ── Re-embed all TrackEvents for this track ────────────────────────
+                for ev in track_events_for_this_track:
+                    self._reembed_track_event(ev)
+
+                self.db.commit()
+                attributed_count += 1
+                already_attributed.add(track_id)
+
+                self.logger.info(
+                    "attribute_processor_track_done",
+                    video=video_filename,
+                    track_id=track_id,
+                    object_class=object_class,
+                    attributed=True,
                 )
-            elif person_attrs:
-                self._update_best_detected_object_person(
-                    video_filename, track_id, person_attrs,
+
+            except Exception as track_exc:
+                self.logger.warning(
+                    "attribute_processor_track_failed",
+                    video=video_filename,
+                    track_id=entry_event.track_id,
+                    object_class=entry_event.object_class,
+                    error=str(track_exc),
                 )
-
-            self.db.flush()
-
-            # ── Enrich rag_text with motion semantics before re-embedding ─────
-            # Phase 6A wrote motion_clause into initial rag_text, but Phase 6B
-            # overwrote rag_text with attribute-only text that drops motion events.
-            # Re-append motion_summary so the embedding captures fall/stop/walking.
-            for ev in track_events_for_this_track:
-                ms = (ev.attributes or {}).get("motion_summary", {})
-                mevts = ms.get("motion_events", [])
-                dom   = ms.get("dominant_state", "")
-                if ev.rag_text and (mevts or (dom and dom not in ("stationary", "unknown", ""))):
-                    motion_parts = []
-                    if dom and dom not in ("stationary", "unknown", ""):
-                        motion_parts.append(f"predominantly {dom}")
-                    if mevts:
-                        motion_parts.append("; ".join(mevts[:3]))
-                    ev.rag_text = ev.rag_text.rstrip(".") + ". Motion: " + ", ".join(motion_parts) + "."
-                    flag_modified(ev, "rag_text")
-
-            # ── Re-embed all TrackEvents for this track ────────────────────────
-            for ev in track_events_for_this_track:
-                self._reembed_track_event(ev)
-
-            self.db.commit()
-            attributed_count += 1
-
-            self.logger.info(
-                "attribute_processor_track_done",
-                video=video_filename,
-                track_id=track_id,
-                object_class=object_class,
-                attributed=True,
-            )
+                # Roll back the failed transaction so the session remains usable
+                # for subsequent tracks in this window.
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
 
         self.logger.info(
             "attribute_processor_complete",

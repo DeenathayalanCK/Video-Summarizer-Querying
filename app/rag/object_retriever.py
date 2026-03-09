@@ -148,8 +148,7 @@ class ObjectRetriever:
 
         stmt = stmt.order_by("distance").limit(self.top_k)
         rows = self.db.execute(stmt).fetchall()
-
-        return [
+        results = [
             {
                 "event_id": str(row.id),
                 "video_filename": row.video_filename,
@@ -169,6 +168,41 @@ class ObjectRetriever:
             }
             for row in rows
         ]
+
+        # Fallback: if embedding search returned nothing, return recent entry events.
+        # Covers live windows before _run_reembed runs.
+        if not results:
+            try:
+                q = self.db.query(TrackEvent).filter(TrackEvent.event_type == "entry")
+                if video_filename:
+                    q = q.filter(TrackEvent.video_filename == video_filename)
+                if camera_id:
+                    q = q.filter(TrackEvent.camera_id == camera_id)
+                if object_class:
+                    q = q.filter(TrackEvent.object_class == object_class)
+                evs = q.order_by(TrackEvent.first_seen_second.desc()).limit(self.top_k).all()
+                for ev in evs:
+                    results.append({
+                        "event_id": str(ev.id),
+                        "video_filename": ev.video_filename,
+                        "camera_id": ev.camera_id,
+                        "track_id": ev.track_id,
+                        "object_class": ev.object_class,
+                        "event_type": ev.event_type,
+                        "first_seen": ev.first_seen_second,
+                        "last_seen": ev.last_seen_second,
+                        "duration": ev.duration_seconds,
+                        "best_frame_second": ev.best_frame_second,
+                        "best_crop_path": ev.best_crop_path,
+                        "best_confidence": round(ev.best_confidence or 0, 3),
+                        "rag_text": ev.rag_text,
+                        "attributes": ev.attributes,
+                        "score": 0.5,  # neutral score for fallback results
+                    })
+            except Exception as e:
+                self.logger.debug("search_track_events_fallback_failed", error=str(e))
+
+        return results
 
     def attribute_keyword_search(
         self,

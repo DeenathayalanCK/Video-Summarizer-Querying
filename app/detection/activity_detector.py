@@ -31,7 +31,13 @@ import numpy as np
 from app.core.logging import get_logger
 
 # COCO class IDs → activity-relevant labels
+# Extended for lobby/entrance surveillance:
+#   24=backpack, 26=handbag, 28=suitcase, 39=bottle added for carried-item detection
 ACTIVITY_OBJECTS = {
+    24:  "backpack",
+    26:  "handbag",
+    28:  "suitcase",
+    39:  "bottle",
     41:  "cup",
     62:  "tv_monitor",
     63:  "laptop",
@@ -44,26 +50,40 @@ ACTIVITY_OBJECTS = {
 }
 
 # Activities that warrant every-minute snapshots
+# Extended with transit activities for lobby surveillance
 SNAPSHOT_ACTIVITIES = {
     "working on laptop",
     "using phone",
     "working on laptop, using phone",
     "reading / taking notes",
     "looking at screen",
+    "carrying luggage",
+    "carrying bag and backpack",
+    "carrying backpack",
+    "carrying bag",
 }
 
 
 def infer_activity(objects: list) -> str:
+    """
+    Infer a human-readable activity label from the list of detected nearby objects.
+    Priority order: work tasks > phone > reading > transit > desk presence > present.
+    """
     objs = set(objects)
     if not objs:
         return "present"
-    has_phone    = "cell_phone" in objs
-    has_laptop   = "laptop" in objs
-    has_keyboard = "keyboard" in objs
-    has_book     = "book" in objs
-    has_cup      = "cup" in objs
-    has_monitor  = "tv_monitor" in objs
+    has_phone    = "cell_phone"  in objs
+    has_laptop   = "laptop"      in objs
+    has_keyboard = "keyboard"    in objs
+    has_book     = "book"        in objs
+    has_cup      = "cup"         in objs
+    has_monitor  = "tv_monitor"  in objs
+    has_backpack = "backpack"    in objs
+    has_handbag  = "handbag"     in objs
+    has_suitcase = "suitcase"    in objs
+    has_bottle   = "bottle"      in objs
 
+    # Work activities (highest priority)
     if has_phone and has_laptop:
         return "working on laptop, using phone"
     if has_laptop or (has_keyboard and has_monitor):
@@ -74,7 +94,19 @@ def infer_activity(objects: list) -> str:
         return "reading / taking notes"
     if has_monitor:
         return "looking at screen"
-    if has_cup:
+
+    # Transit / carrying items
+    if has_suitcase:
+        return "carrying luggage"
+    if has_backpack and has_handbag:
+        return "carrying bag and backpack"
+    if has_backpack:
+        return "carrying backpack"
+    if has_handbag:
+        return "carrying bag"
+
+    # Desk/stationary presence
+    if has_cup or has_bottle:
         return "at desk"
     return "present"
 
@@ -97,13 +129,20 @@ class ActivityDetector:
     def detect_on_context(
         self,
         frame: np.ndarray,
-        bbox: tuple,               # (x1, y1, x2, y2) in pixel coords
-        expand: float = 2.5,       # expand factor around person bbox
-        confidence: float = 0.30,  # lower than default — small objects in crops
+        bbox: tuple,                  # (x1, y1, x2, y2) in pixel coords
+        expand_x: float = 3.0,        # horizontal expand — catches shoulder bags
+        expand_y: float = 2.0,        # vertical expand — catches items held at waist
+        confidence: float = 0.30,     # lower than default — small objects in crops
     ) -> tuple:
         """
-        Expand the person bbox by `expand` factor, crop from full frame,
-        run YOLO restricted to ACTIVITY_OBJECTS classes.
+        Expand the person bbox asymmetrically and crop from the full frame,
+        then run YOLO restricted to ACTIVITY_OBJECTS classes.
+
+        Asymmetric expand rationale (lobby/door surveillance):
+          - expand_x=3.0: backpacks and handbags are carried on the side/shoulder;
+            a wider horizontal crop ensures they are within the detection area.
+          - expand_y=2.0: items held at waist height (phone, cup, bottle) need
+            only modest vertical expansion beyond the person bbox.
 
         Returns (object_list, activity_hint).
         """
@@ -116,9 +155,9 @@ class ActivityDetector:
             bw = x2 - x1
             bh = y2 - y1
 
-            # Expand symmetrically — include desk area above/below/sides
-            pad_x = bw * (expand - 1) / 2
-            pad_y = bh * (expand - 1) / 2
+            # Asymmetric expand — wider horizontal for shoulder/carried items
+            pad_x = bw * (expand_x - 1) / 2
+            pad_y = bh * (expand_y - 1) / 2
             ex1 = max(0,  int(x1 - pad_x))
             ey1 = max(0,  int(y1 - pad_y))
             ex2 = min(w,  int(x2 + pad_x))

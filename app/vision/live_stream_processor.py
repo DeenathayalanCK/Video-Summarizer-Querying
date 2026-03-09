@@ -51,6 +51,10 @@ class LiveTrack:
     # Activity detection (Stage 1 — YOLO objects on crop)
     objects_nearby:  list = field(default_factory=list)
     activity_hint:   str = "present"
+    # Face detection results (populated at track close)
+    face_crop_path:  Optional[str] = None
+    face_detected:   bool = False
+    face_confidence: float = 0.0
     # For TrackEvent writing
     track_event_written: bool = False   # entry event written to DB
     det_obj_id:      Optional[str] = None  # DetectedObject UUID
@@ -123,7 +127,9 @@ class LiveStreamProcessor:
         self.detector     = ObjectDetector()
         self.reid         = AppearanceReID()
         from app.detection.activity_detector import ActivityDetector
-        self.activity     = ActivityDetector()
+        self.activity      = ActivityDetector()
+        from app.detection.face_detector import FaceDetector
+        self.face_detector = FaceDetector.get_instance()
 
         self._thread:     Optional[threading.Thread] = None
         self._stop_evt    = threading.Event()
@@ -143,6 +149,15 @@ class LiveStreamProcessor:
         # Kept for MERGE_GAP_SECONDS so stationary desk workers re-acquire same label.
         self._lost_tracks: dict = {}
         self._lost_tracks_lock = threading.Lock()
+
+        # Bug 4 fix: per-track_id wall-time of last activity detection poll.
+        # Activity detection runs every N frames OR every 5 real-seconds,
+        # whichever comes first — not just on crop-improvement events.
+        self._last_activity_check: Dict[int, float] = {}   # track_id → epoch float
+
+        # Bug 2 fix: per-track_id wall-time of last activity_snapshot write.
+        # write_activity_snapshot() is called at most once per 60s per track.
+        self._last_snapshot_time: Dict[int, datetime] = {}  # track_id → datetime
 
     # ── Control ───────────────────────────────────────────────────────────────
 
@@ -194,6 +209,9 @@ class LiveStreamProcessor:
                         # Activity detection results (populated every 5 frames)
                         "objects_nearby": list(t.objects_nearby) if hasattr(t, "objects_nearby") else [],
                         "activity_hint":  t.activity_hint if hasattr(t, "activity_hint") else "present",
+                        "face_detected":   getattr(t, "face_detected", False),
+                        "face_crop_path":  getattr(t, "face_crop_path", None),
+                        "face_confidence": getattr(t, "face_confidence", 0.0),
                     })
             return sorted(result, key=lambda x: x["person_label"])
 
@@ -312,15 +330,39 @@ class LiveStreamProcessor:
                     if crop is not None and crop.size > 0:
                         path = self._save_crop(crop, existing.person_label, wall_time)
                         if path:
-                            # Stage 1 activity: detect objects in context crop
+                            # Stage 1 activity: detect objects in context crop (on crop improvement)
                             objs, hint = self.activity.detect_on_context(frame, bbox_now)
                             with self._tracks_lock:
                                 existing.best_crop_path  = path
                                 existing.best_confidence = det.confidence
                                 existing.objects_nearby  = objs
                                 existing.activity_hint   = hint
+                            self._last_activity_check[det.track_id] = time.time()
                             self._update_identity_embedding(
                                 existing.person_label, path, write_db)
+
+                # Bug 4 fix: also poll activity every 5 real-seconds regardless of
+                # crop improvement — a seated desk worker's confidence never improves
+                # after the first few seconds, so without this the activity freezes.
+                _now_f = time.time()
+                _last_act = self._last_activity_check.get(det.track_id, 0.0)
+                if _now_f - _last_act >= 5.0:
+                    objs_p, hint_p = self.activity.detect_on_context(frame, bbox_now)
+                    with self._tracks_lock:
+                        existing.objects_nearby = objs_p
+                        existing.activity_hint  = hint_p
+                    self._last_activity_check[det.track_id] = _now_f
+
+                # Bug 2 fix: write an activity_snapshot every 60s for notable activities
+                _last_snap = self._last_snapshot_time.get(det.track_id)
+                _snap_due  = (
+                    _last_snap is None or
+                    (wall_time - _last_snap).total_seconds() >= 60
+                )
+                if _snap_due and existing.activity_hint not in ("present", None, ""):
+                    from app.detection.activity_detector import write_activity_snapshot
+                    write_activity_snapshot(existing, window_key, wall_time, write_db)
+                    self._last_snapshot_time[det.track_id] = wall_time
 
                 if existing.frame_count % 10 == 0:
                     self._persist_session(existing, write_db)
@@ -359,6 +401,16 @@ class LiveStreamProcessor:
                     # Also clean position cache if this label was there
                     with self._lost_tracks_lock:
                         self._lost_tracks.pop(reused_label, None)
+                    # Fix: rename tmp crop to labelled name for reused-label tracks
+                    if crop_path and f"tmp{det.track_id}" in crop_path:
+                        _rl_new = crop_path.replace(f"tmp{det.track_id}", reused_label)
+                        try:
+                            os.rename(crop_path, _rl_new)
+                            crop_path = _rl_new
+                            self._update_identity_crop_path(
+                                reused_label, crop_path, write_db)
+                        except Exception:
+                            pass
                     track = LiveTrack(
                         track_id=det.track_id,
                         person_label=reused_label,
@@ -372,8 +424,15 @@ class LiveStreamProcessor:
                         last_state="walking",
                         last_bbox=bbox_now,
                         frame_count=1,
-                        track_event_written=True,  # inherit from prior track
+                        # Bug 10 fix: always write an entry event for re-acquired tracks.
+                        # The person may have been lost across a window boundary — without
+                        # a new entry event in the current window, Ask/Search won't see them.
+                        track_event_written=False,
                     )
+                    # Write entry event for this window (safe even if already exists
+                    # — _write_track_event_entry wraps the DB add in try/except)
+                    self._write_track_event_entry(track, window_key, write_db)
+                    self._write_detected_object(det, track, frame, window_key, write_db)
                 else:
                     person_label, session_id = self._identify_or_create(
                         det, embedding, crop_path, wall_time, write_db, read_db)
@@ -384,6 +443,10 @@ class LiveStreamProcessor:
                         try:
                             os.rename(crop_path, new_path)
                             crop_path = new_path
+                            # Fix: sync renamed path back to PersonIdentity so the
+                            # crop API endpoint can find the file by its new name.
+                            self._update_identity_crop_path(
+                                person_label, new_path, write_db)
                         except Exception: pass
 
                     track = LiveTrack(
@@ -457,6 +520,9 @@ class LiveStreamProcessor:
                     to_close.append((tid, track))
 
         for tid, track in to_close:
+            # Face detection on best keyframe BEFORE exit event — so face
+            # fields are already in attributes when exit is written
+            self._run_face_detection(track, wall_time, write_db)
             self._write_track_event_exit(track, track.window_key, wall_time, write_db)
             self._close_session(track, wall_time, write_db)
             # Register in position cache so re-acquisition gets same label
@@ -464,14 +530,19 @@ class LiveStreamProcessor:
                 self._register_lost_track(track, wall_time)
             with self._tracks_lock:
                 self._tracks.pop(tid, None)
+            # Clean per-track state dicts to avoid unbounded growth
+            self._last_activity_check.pop(tid, None)
+            self._last_snapshot_time.pop(tid, None)
             self.logger.info("live_person_exited",
                              person=track.person_label,
+                             face_detected=track.face_detected,
                              duration=f"{(wall_time-track.first_seen).total_seconds():.0f}s")
 
     def _close_all_sessions(self, wall_time: datetime, window_key: str, db):
         with self._tracks_lock:
             tracks = list(self._tracks.values())
         for track in tracks:
+            self._run_face_detection(track, wall_time, db)
             self._write_track_event_exit(track, track.window_key, wall_time, db)
             self._close_session(track, wall_time, db)
             if track.last_bbox != (0, 0, 0, 0):
@@ -514,10 +585,29 @@ class LiveStreamProcessor:
                     "live":            True,
                     "entry_wall_time": track.first_seen.isoformat(),
                     "objects_nearby":  [],
-                    "activity_hint":   None,
+                    "activity_hint":   "present",
                 },
             )
             db.add(ev)
+            db.flush()   # get ev.id without full commit
+
+            # Write initial embedding immediately so Ask/Search works while
+            # the window is still LIVE (not just after it closes + reembed).
+            # _run_reembed() will overwrite this with the enriched version later.
+            try:
+                from app.storage.models import TrackEventEmbedding
+                from app.rag.embedder import OllamaEmbedder
+                vec = OllamaEmbedder().embed(ev.rag_text)
+                if vec is not None:
+                    db.add(TrackEventEmbedding(
+                        track_event_id=ev.id,
+                        embedding=vec,
+                        model_name=self.settings.embed_model
+                            if hasattr(self.settings, "embed_model") else "nomic-embed-text",
+                    ))
+            except Exception:
+                pass  # embedding failure must never block entry write
+
             db.commit()
             with self._tracks_lock:
                 track.track_event_written = True
@@ -564,7 +654,14 @@ class LiveStreamProcessor:
                         exit_wall_time=exit_time.isoformat(),
                         last_state=track.last_state,
                         duration_seconds=round(dur, 1),
+                        objects_nearby=track.objects_nearby if hasattr(track, "objects_nearby") else [],
+                        activity_hint=track.activity_hint if hasattr(track, "activity_hint") else "present",
+                        face_detected=getattr(track, "face_detected", False),
+                        face_crop_path=getattr(track, "face_crop_path", None),
+                        face_confidence=getattr(track, "face_confidence", 0.0),
                     )
+                from sqlalchemy.orm.attributes import flag_modified as _fm
+                _fm(ev, "attributes")
                 db.commit()
         except Exception as e:
             self.logger.debug("track_event_exit_failed", error=str(e))
@@ -595,7 +692,10 @@ class LiveStreamProcessor:
                         duration_seconds=round(dur, 1),
                         last_state=track.last_state,
                         objects_nearby=track.objects_nearby if hasattr(track, "objects_nearby") else [],
+                        activity_hint=track.activity_hint if hasattr(track, "activity_hint") else "present",
                     )
+                from sqlalchemy.orm.attributes import flag_modified as _fm
+                _fm(ev, "attributes")
                 db.commit()
         except Exception as e:
             self.logger.debug("track_event_update_failed", error=str(e))
@@ -630,6 +730,63 @@ class LiveStreamProcessor:
 
     # ── Person identity (ReID + sessions) ─────────────────────────────────────
 
+
+    def _run_face_detection(self, track: "LiveTrack", wall_time: datetime, db):
+        """
+        Run face detection on the track's best keyframe and persist results.
+        Called once at track close — uses the highest-quality crop accumulated
+        over the full track duration, not the first blurry entry frame.
+        """
+        if not track.best_crop_path:
+            return
+        try:
+            from app.storage.models import TrackEvent
+            from sqlalchemy import and_
+            from sqlalchemy.orm.attributes import flag_modified
+
+            faces_dir = self.settings.live_crops_path.rstrip("/") + "/faces"
+            result = self.face_detector.detect(
+                crop_path=track.best_crop_path,
+                save_dir=faces_dir,
+                label=track.person_label,
+                wall_time=wall_time,
+            )
+
+            # Store on in-memory track so exit writer picks them up
+            track.face_detected   = result.detected
+            track.face_crop_path  = result.face_crop_path
+            track.face_confidence = result.confidence
+
+            # Also update the TrackEvent.attributes immediately
+            ev = db.query(TrackEvent).filter(
+                and_(
+                    TrackEvent.video_filename == track.window_key,
+                    TrackEvent.track_id       == track.track_id,
+                    TrackEvent.event_type     == "entry",
+                )
+            ).first()
+            if ev:
+                attrs = dict(ev.attributes or {})
+                attrs["face_detected"]   = result.detected
+                attrs["face_crop_path"]  = result.face_crop_path
+                attrs["face_confidence"] = result.confidence
+                attrs["face_method"]     = result.method
+                ev.attributes = attrs
+                flag_modified(ev, "attributes")
+                db.commit()
+
+            self.logger.info(
+                "face_detection_done",
+                person=track.person_label,
+                detected=result.detected,
+                method=result.method,
+                confidence=result.confidence,
+            )
+        except Exception as e:
+            self.logger.debug("face_detection_failed",
+                              person=track.person_label, error=str(e))
+            try: db.rollback()
+            except Exception: pass
 
     def _match_by_position(self, bbox: tuple, wall_time: datetime,
                             merge_gap_seconds: int = 30) -> tuple:
@@ -918,7 +1075,23 @@ class LiveStreamProcessor:
                 stored  = np.array(ident.embedding, dtype=np.float32)
                 blended = 0.7 * stored + 0.3 * new_emb
                 n       = np.linalg.norm(blended)
-                ident.embedding = (blended/n if n>0 else blended).tolist()
+                ident.embedding      = (blended/n if n>0 else blended).tolist()
+                # Fix: keep best_crop_path in sync with the highest-confidence
+                # crop — previously only the embedding was updated here.
+                ident.best_crop_path = crop_path
+                db.commit()
+        except Exception:
+            try: db.rollback()
+            except Exception: pass
+
+    def _update_identity_crop_path(self, person_label: str, crop_path: str, db):
+        """Persist best_crop_path to PersonIdentity after a rename or better crop."""
+        from app.storage.live_models import PersonIdentity
+        try:
+            ident = db.query(PersonIdentity).filter(
+                PersonIdentity.person_label == person_label).first()
+            if ident:
+                ident.best_crop_path = crop_path
                 db.commit()
         except Exception:
             try: db.rollback()

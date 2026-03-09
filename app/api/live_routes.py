@@ -249,20 +249,85 @@ def reset_identities(db: Session = Depends(get_db)):
 @router.get("/crop/{person_label}")
 def get_crop(person_label: str, db: Session = Depends(get_db)):
     """Return the best crop image for a person label."""
+    crop_path = None
+
+    # Primary: DB-persisted best crop
     identity = db.query(PersonIdentity).filter(
         PersonIdentity.person_label == person_label).first()
-    if not identity or not identity.best_crop_path:
+    if identity and identity.best_crop_path and os.path.exists(identity.best_crop_path):
+        crop_path = identity.best_crop_path
+
+    # Fallback: in-memory live track (handles the window between crop save and
+    # DB commit, and the tmp-rename bug on older DB records).
+    if not crop_path:
+        proc = LiveStreamProcessor.get_instance()
+        for t in proc.get_active_tracks():
+            if t["person_label"] == person_label and t.get("best_crop_path"):
+                if os.path.exists(t["best_crop_path"]):
+                    crop_path = t["best_crop_path"]
+                    break
+
+    if not crop_path:
         raise HTTPException(status_code=404, detail="No crop available")
-    if not os.path.exists(identity.best_crop_path):
-        raise HTTPException(status_code=404, detail="Crop file not found")
     return FileResponse(
-        identity.best_crop_path,
+        crop_path,
         media_type="image/jpeg",
         headers={"Cache-Control": "max-age=30"},
     )
 
 
 # ── Person history detail ────────────────────────────────────────────────────
+
+
+@router.get("/face/{person_label}")
+def get_live_face(person_label: str, db: Session = Depends(get_db)):
+    """
+    Return the latest face crop for a live person identity.
+    Reads from the most recent entry TrackEvent where face_detected=true.
+    Used by the live person cards in the UI to show face thumbnail.
+    """
+    from app.storage.models import TrackEvent
+    from app.storage.live_models import PersonIdentity
+
+    identity = db.query(PersonIdentity).filter(
+        PersonIdentity.person_label == person_label
+    ).first()
+
+    if not identity:
+        return {"person_label": person_label, "face_detected": False,
+                "error": "identity_not_found"}
+
+    # Find most recent entry event with face_detected=true
+    # We query all entry events and filter Python-side to avoid JSONB operator issues
+    recent_events = (
+        db.query(TrackEvent)
+        .filter(
+            TrackEvent.event_type == "entry",
+        )
+        .order_by(TrackEvent.first_seen_second.desc())
+        .limit(200)
+        .all()
+    )
+
+    for ev in recent_events:
+        attrs = ev.attributes or {}
+        if attrs.get("person_label") == person_label and attrs.get("face_detected"):
+            return {
+                "person_label":    person_label,
+                "face_detected":   True,
+                "face_crop_path":  attrs.get("face_crop_path"),
+                "face_confidence": attrs.get("face_confidence", 0.0),
+                "face_method":     attrs.get("face_method"),
+                "window":          ev.video_filename,
+                "best_crop_path":  ev.best_crop_path,
+            }
+
+    return {
+        "person_label": person_label,
+        "face_detected": False,
+        "best_crop_path": identity.best_crop_path,
+    }
+
 
 @router.get("/person/{person_label}")
 def person_detail(person_label: str, db: Session = Depends(get_db)):

@@ -432,6 +432,16 @@ def get_tracks(
                 "best_crop_path": e.best_crop_path,
                 "best_confidence": round(e.best_confidence or 0, 3),
                 "attributes": e.attributes,
+                # Convenience top-level fields surfaced from attributes
+                # (avoids UI having to dig into the attributes blob)
+                "face_detected":   (e.attributes or {}).get("face_detected", False),
+                "face_crop_path":  (e.attributes or {}).get("face_crop_path"),
+                "face_confidence": (e.attributes or {}).get("face_confidence", 0.0),
+                "person_label":    (e.attributes or {}).get("person_label"),
+                "entry_wall_time": (e.attributes or {}).get("entry_wall_time"),
+                "exit_wall_time":  (e.attributes or {}).get("exit_wall_time"),
+                "activity_hint":   (e.attributes or {}).get("activity_hint"),
+                "objects_nearby":  (e.attributes or {}).get("objects_nearby", []),
             }
             for e in events
         ],

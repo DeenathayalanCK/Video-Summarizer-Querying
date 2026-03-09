@@ -455,9 +455,12 @@ class TemporalRetriever:
         video_filename: Optional[str] = None,
     ) -> list[tuple[str, int]]:
         """
-        Semantic search over TrackEventEmbedding.
-        Returns list of (video_filename, track_id) pairs, deduplicated.
+        Semantic search over TrackEventEmbedding with text fallback.
+        INNER JOIN returns results only when embeddings exist.
+        Falls back to keyword search on rag_text for live windows where
+        embeddings haven't been written yet (or reembed hasn't run).
         """
+        from sqlalchemy import or_
         stmt = (
             select(
                 TrackEvent.video_filename,
@@ -479,8 +482,34 @@ class TemporalRetriever:
             if key not in seen:
                 seen.add(key)
                 result.append(key)
+        result = result[:self.top_k]
 
-        return result[:self.top_k]
+        # ── Fallback: text search if embedding search returned nothing ─────────
+        # This handles live windows where _run_reembed hasn't run yet AND
+        # no initial embedding was written (e.g. existing DB rows before fix31).
+        if not result:
+            self.logger.debug("semantic_track_search_fallback", reason="no_embeddings_found")
+            try:
+                # Simple text search: pull recent entry events, score by attribute match
+                q = (
+                    self.db.query(TrackEvent)
+                    .filter(TrackEvent.event_type == "entry")
+                )
+                if video_filename:
+                    q = q.filter(TrackEvent.video_filename == video_filename)
+                recent = q.order_by(TrackEvent.first_seen_second.desc()).limit(50).all()
+                seen2 = set()
+                for ev in recent:
+                    key = (ev.video_filename, ev.track_id)
+                    if key not in seen2:
+                        seen2.add(key)
+                        result.append(key)
+                        if len(result) >= self.top_k:
+                            break
+            except Exception as e:
+                self.logger.debug("semantic_track_search_fallback_failed", error=str(e))
+
+        return result
 
     def render_contexts_as_text(self, contexts: list[TrackContext]) -> str:
         """

@@ -382,6 +382,29 @@ def get_detections(
         min_second=min_second,
         max_second=max_second,
     )
+    def _build_attributes(o) -> dict:
+        """
+        Build an attributes dict from Phase 6B columns on DetectedObject so the
+        frontend renderAttributes() helper can display person/vehicle pills the
+        same way it does for TrackEvents.
+        """
+        attrs: dict = {"object_class": o.object_class}
+        if o.object_class == "person":
+            if o.person_gender:
+                attrs["gender_estimate"] = o.person_gender
+            if o.person_clothing_top:
+                attrs["clothing_top"] = o.person_clothing_top
+            if o.person_clothing_bottom:
+                attrs["clothing_bottom"] = o.person_clothing_bottom
+        else:
+            if o.vehicle_color:
+                attrs["color"] = o.vehicle_color
+            if o.vehicle_type:
+                attrs["type"] = o.vehicle_type
+            if o.vehicle_make:
+                attrs["make_estimate"] = o.vehicle_make
+        return attrs
+
     return {
         "video_filename": video_filename,
         "count": len(objects),
@@ -398,6 +421,8 @@ def get_detections(
                     "x1": o.bbox_x1, "y1": o.bbox_y1,
                     "x2": o.bbox_x2, "y2": o.bbox_y2,
                 },
+                # Phase 6B person / vehicle attributes — None fields are omitted
+                "attributes": _build_attributes(o),
             }
             for o in objects
         ],
@@ -478,6 +503,7 @@ def generate_summary(
     force: bool = Query(False),
     db: Session = Depends(get_db),
 ):
+    import requests as _requests
     summarizer = VideoSummarizer(db)
     repo = EventRepository(db)
     try:
@@ -488,6 +514,25 @@ def generate_summary(
             summary = summarizer.summarize(video_filename, force=force)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except _requests.exceptions.Timeout:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Ollama timed out generating the summary. "
+                "The video may have too many events, or the model is under load. "
+                "Try again, or increase CAPTION_TIMEOUT_SECONDS in your .env."
+            ),
+        )
+    except _requests.exceptions.ConnectionError:
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot reach Ollama. Check that the service is running and OLLAMA_HOST is correct.",
+        )
+    except _requests.exceptions.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Ollama returned an error: {e}")
+    except Exception as e:
+        logger.error("summarize_unexpected_error", video=video_filename, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Summarization failed: {e}")
     return {
         "video_filename": summary.video_filename,
         "caption_count": summary.caption_count,

@@ -185,13 +185,40 @@ class VideoSummarizer:
             "options": {"num_ctx": 8192, "num_predict": 800},
         }
 
-        response = requests.post(
-            f"{self.settings.ollama_host}/api/generate",
-            json=payload,
-            timeout=self.settings.caption_timeout_seconds,
-        )
-        response.raise_for_status()
-        summary_text = response.json()["response"]
+        # Summarization sends many tokens (full event block) so it needs more
+        # time than a single-frame caption.  Use caption_timeout_seconds as the
+        # floor but enforce a 600 s ceiling so we don't hang indefinitely.
+        # If the first attempt times out, retry once before giving up.
+        summary_timeout = min(max(self.settings.caption_timeout_seconds, 300), 600)
+        last_exc = None
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    f"{self.settings.ollama_host}/api/generate",
+                    json=payload,
+                    timeout=summary_timeout,
+                )
+                response.raise_for_status()
+                summary_text = response.json()["response"]
+                break  # success
+            except requests.exceptions.Timeout as exc:
+                self.logger.warning(
+                    "summarize_from_tracks_timeout",
+                    video=video_filename,
+                    attempt=attempt + 1,
+                    timeout=summary_timeout,
+                )
+                last_exc = exc
+                if attempt == 0:
+                    continue  # retry once
+                raise  # second failure — let caller handle
+            except requests.exceptions.RequestException as exc:
+                self.logger.error(
+                    "summarize_from_tracks_request_error",
+                    video=video_filename,
+                    error=str(exc),
+                )
+                raise
 
         # Save or update
         if existing:
@@ -273,13 +300,34 @@ class VideoSummarizer:
             "options": {"num_ctx": 8192, "num_predict": 800},
         }
 
-        response = requests.post(
-            f"{self.settings.ollama_host}/api/generate",
-            json=payload,
-            timeout=self.settings.caption_timeout_seconds,
-        )
-        response.raise_for_status()
-        summary_text = response.json()["response"]
+        summary_timeout = min(max(self.settings.caption_timeout_seconds, 300), 600)
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    f"{self.settings.ollama_host}/api/generate",
+                    json=payload,
+                    timeout=summary_timeout,
+                )
+                response.raise_for_status()
+                summary_text = response.json()["response"]
+                break
+            except requests.exceptions.Timeout:
+                self.logger.warning(
+                    "summarize_timeout",
+                    video=video_filename,
+                    attempt=attempt + 1,
+                    timeout=summary_timeout,
+                )
+                if attempt == 0:
+                    continue
+                raise
+            except requests.exceptions.RequestException as exc:
+                self.logger.error(
+                    "summarize_request_error",
+                    video=video_filename,
+                    error=str(exc),
+                )
+                raise
 
         if existing:
             existing.summary_text = summary_text

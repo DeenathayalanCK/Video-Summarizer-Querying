@@ -2572,6 +2572,7 @@
                                 <div class="text-xs font-medium text-indigo-300">${d.object_class}</div>
                                 <div class="text-xs text-gray-500">@ ${fmt(d.second)} · ${d.quadrant}</div>
                                 <div class="text-xs text-gray-600">conf: ${(d.confidence * 100).toFixed(0)}% · track #${d.track_id ?? "?"}</div>
+                                ${d.attributes ? renderAttributes(d.attributes) : ""}
                               </div>
                             `,
                               )

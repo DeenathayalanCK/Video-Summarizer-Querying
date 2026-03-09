@@ -350,6 +350,21 @@ class WindowManager:
                                          cx=m.cx, cy=m.cy, w=m.w, h=m.h)
                             for m in motion_samps]
             duration = ev.last_seen_second - ev.first_seen_second
+            # For live tracks: if duration is 0 (exit not yet flushed),
+            # try to compute from wall-clock attributes
+            if duration <= 0 and ev.attributes:
+                entry_wall = ev.attributes.get("entry_wall_time")
+                exit_wall  = ev.attributes.get("exit_wall_time")
+                if entry_wall and exit_wall:
+                    import datetime as _dt
+                    try:
+                        _tw_in  = _dt.datetime.fromisoformat(entry_wall)
+                        _tw_out = _dt.datetime.fromisoformat(exit_wall)
+                        duration = max(1.0, (_tw_out - _tw_in).total_seconds())
+                    except Exception:
+                        duration = max(1.0, len(seconds_by_track.get(ev.track_id, [1, 2])))
+                else:
+                    duration = max(1.0, len(seconds_by_track.get(ev.track_id, [1, 2])))
 
             track_states[ev.track_id] = TrackState(
                 track_id=ev.track_id,
@@ -364,7 +379,20 @@ class WindowManager:
                 motion_samples=rel_samples,
             )
 
-        behaviours = TemporalAnalyzer().analyze(track_states, det_by_track)
+        # Guard: remove zero-duration tracks that TemporalAnalyzer can't process
+        track_states = {
+            tid: ts for tid, ts in track_states.items()
+            if ts.last_seen > 0 or len(ts.all_seconds) > 1
+        }
+        if not track_states:
+            self.logger.warning("window_temporal_no_valid_tracks", key=key)
+            return
+
+        try:
+            behaviours = TemporalAnalyzer().analyze(track_states, det_by_track)
+        except Exception as te:
+            self.logger.warning("window_temporal_analyze_failed", key=key, error=str(te))
+            return
         beh_map    = {b.track_id: b for b in behaviours}
 
         all_events = db.query(TrackEvent).filter(
@@ -400,11 +428,12 @@ class WindowManager:
                     if emb:
                         emb.embedding = vec
                     else:
-                        from app.core.config import get_settings
+                        from app.core.config import get_settings as _gs
+                        _s = _gs()
                         db.add(TrackEventEmbedding(
                             track_event_id=ev.id,
                             embedding=vec,
-                            model_name=get_settings().embedding_model,
+                            model_name=_s.embed_model,
                         ))
                     count += 1
                 except Exception:

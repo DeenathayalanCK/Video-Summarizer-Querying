@@ -928,7 +928,23 @@
 
       function fmt(s) {
         if (s == null || isNaN(s)) return "0:00";
+        // Epoch seconds (> 86400 = more than 1 day) → wall-clock time display
+        if (s > 86400) {
+          const d = new Date(s * 1000);
+          return d.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          });
+        }
         return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+      }
+
+      // Format timestamp: if ISO string use _fmtTime, if epoch use fmt, if null "—"
+      function fmtAny(val) {
+        if (!val) return "—";
+        if (typeof val === "string" && val.includes("T")) return _fmtTime(val);
+        return fmt(Number(val));
       }
 
       function spinner() {
@@ -2305,7 +2321,9 @@
 
       function renderAttributes(attrs) {
         if (!attrs) return "";
-        const cls = attrs.object_class || "";
+        // For live tracks: object_class may not be in attributes dict.
+        // Infer from person_label (starts with "P") or explicit object_class field.
+        const cls = attrs.object_class || (attrs.person_label ? "person" : "");
         const parts = [];
         const visibleText =
           attrs.visible_text &&
@@ -2313,7 +2331,7 @@
             ? attrs.visible_text
             : null;
 
-        if (cls === "person") {
+        if (cls === "person" || attrs.person_label) {
           if (attrs.gender_estimate && attrs.gender_estimate !== "unknown")
             parts.push(attrs.gender_estimate);
           if (attrs.age_estimate && attrs.age_estimate !== "unknown")
@@ -2373,6 +2391,10 @@
             cup: "☕",
             remote: "📡",
             clock: "🕐",
+            backpack: "🎒",
+            handbag: "👜",
+            suitcase: "🧳",
+            bottle: "🍶",
           };
           html +=
             `<div class="mt-1 flex flex-wrap gap-1">` +
@@ -2383,6 +2405,22 @@
               )
               .join("") +
             `</div>`;
+        }
+
+        // Face detection badge
+        if (attrs.face_detected && attrs.face_crop_path) {
+          const faceUrl = `${API}/face-crop?path=${encodeURIComponent(attrs.face_crop_path)}`;
+          const conf = attrs.face_confidence
+            ? ` ${(attrs.face_confidence * 100).toFixed(0)}%`
+            : "";
+          html += `
+            <div class="mt-1.5 flex items-center gap-1.5">
+              <img src="${faceUrl}" class="w-8 h-8 rounded-full object-cover border border-green-500/50 bg-gray-800"
+                onerror="this.style.display='none'" title="Face detected${conf}" />
+              <span class="text-xs text-green-400 font-medium">😊 Face${conf}</span>
+            </div>`;
+        } else if (attrs.face_detected === false && attrs.face_method) {
+          html += `<div class="mt-1 text-xs text-gray-600">😶 No face detected</div>`;
         }
 
         return html;
@@ -2417,18 +2455,86 @@
                               .map(
                                 (t) => `
                               <div class="glass rounded-xl p-3 fade-in">
-                                ${
-                                  t.best_crop_path
-                                    ? `
-                                  <img src="/api/v1/crop?path=${encodeURIComponent(t.best_crop_path)}"
-                                    class="w-full h-28 object-cover rounded-lg bg-gray-800 mb-2"
-                                    onerror="this.style.display='none'" />
-                                `
-                                    : `<div class="w-full h-28 bg-gray-800 rounded-lg mb-2 flex items-center justify-center text-gray-600 text-xs">no crop</div>`
-                                }
-                                <div class="text-xs font-medium text-indigo-300">${t.object_class}</div>
+                                <div class="relative mb-2">
+                                  ${(() => {
+                                    // Use top-level face fields (populated by routes fix8)
+                                    // falling back to attributes for compatibility
+                                    const attrs = t.attributes || {};
+                                    const faceDetected =
+                                      t.face_detected ??
+                                      attrs.face_detected ??
+                                      false;
+                                    const faceCropPath =
+                                      t.face_crop_path ??
+                                      attrs.face_crop_path ??
+                                      null;
+                                    const faceConf =
+                                      t.face_confidence ??
+                                      attrs.face_confidence ??
+                                      0;
+                                    const personUrl = t.best_crop_path
+                                      ? `/api/v1/crop?path=${encodeURIComponent(t.best_crop_path)}`
+                                      : null;
+                                    const faceUrl =
+                                      faceDetected && faceCropPath
+                                        ? `/api/v1/face-crop?path=${encodeURIComponent(faceCropPath)}`
+                                        : null;
+                                    if (faceUrl && personUrl) {
+                                      const conf = faceConf
+                                        ? (faceConf * 100).toFixed(0) + "%"
+                                        : "";
+                                      return `
+                                        <div class="flex gap-1.5 h-28">
+                                          <img src="${personUrl}" class="flex-1 h-full object-cover rounded-lg bg-gray-800 min-w-0" onerror="this.style.display='none'" />
+                                          <div class="flex flex-col items-center gap-1 shrink-0 justify-center">
+                                            <img src="${faceUrl}"
+                                              class="w-16 h-20 object-cover object-top rounded-lg border-2 border-green-500 bg-gray-800 shadow-lg"
+                                              onerror="this.parentElement.style.display='none'"
+                                              title="Face detected ${conf}" />
+                                            <span class="text-xs text-green-400 font-bold">😊 ${conf}</span>
+                                          </div>
+                                        </div>`;
+                                    } else if (faceUrl) {
+                                      return `<img src="${faceUrl}" class="w-full h-28 object-cover object-top rounded-lg border-2 border-green-500 bg-gray-800" onerror="this.style.display='none'" />
+                                        <div class="absolute top-1 right-1 bg-green-600/80 rounded px-1 text-xs text-white">😊 face</div>`;
+                                    } else if (personUrl) {
+                                      return (
+                                        `<img src="${personUrl}" class="w-full h-28 object-cover rounded-lg bg-gray-800" onerror="this.style.display='none'" />` +
+                                        (attrs.face_method
+                                          ? `<span class="absolute bottom-1 right-1 text-xs bg-black/70 rounded px-1 text-gray-400">😶 no face</span>`
+                                          : "")
+                                      );
+                                    }
+                                    return `<div class="w-full h-28 bg-gray-800 rounded-lg flex items-center justify-center text-gray-600 text-xs">no crop</div>`;
+                                  })()}
+                                </div>
+                                <div class="text-xs font-medium text-indigo-300">
+                                  ${t.person_label || (t.attributes && t.attributes.person_label) || t.object_class}
+                                </div>
                                 <div class="text-xs text-gray-500">Track #${t.track_id} · ${t.event_type}</div>
-                                <div class="text-xs text-gray-600">${fmt(t.first_seen)} → ${fmt(t.last_seen)}</div>
+                                <div class="text-xs text-gray-600">
+                                  ${
+                                    t.entry_wall_time ||
+                                    (t.attributes &&
+                                      t.attributes.entry_wall_time)
+                                      ? _fmtTime(
+                                          t.entry_wall_time ||
+                                            t.attributes.entry_wall_time,
+                                        ) +
+                                        " → " +
+                                        (t.exit_wall_time ||
+                                        (t.attributes &&
+                                          t.attributes.exit_wall_time)
+                                          ? _fmtTime(
+                                              t.exit_wall_time ||
+                                                t.attributes.exit_wall_time,
+                                            )
+                                          : "active")
+                                      : fmt(t.first_seen) +
+                                        " → " +
+                                        fmt(t.last_seen)
+                                  }
+                                </div>
                                 <div class="text-xs text-gray-600">conf: ${(t.best_confidence * 100).toFixed(0)}%</div>
                                 ${t.attributes ? renderAttributes(t.attributes) : ""}
                               </div>
@@ -3294,12 +3400,40 @@
                 </div>`
                     : ""
                 }
+                ${(() => {
+                  if (!p.objects_nearby || !p.objects_nearby.length) return "";
+                  const OBJ_ICONS = {
+                    laptop: "💻",
+                    cell_phone: "📱",
+                    keyboard: "⌨️",
+                    tv_monitor: "🖥",
+                    mouse: "🖱",
+                    book: "📖",
+                    cup: "☕",
+                    backpack: "🎒",
+                    handbag: "👜",
+                    suitcase: "🧳",
+                    bottle: "🍶",
+                  };
+                  return (
+                    `<div class="mt-0.5 flex flex-wrap gap-0.5">` +
+                    p.objects_nearby
+                      .map(
+                        (o) =>
+                          `<span class="text-xs px-1 py-0.5 rounded bg-gray-700/50 border border-gray-600 text-gray-300">${OBJ_ICONS[o] || "📦"} ${o.replace("_", " ")}</span>`,
+                      )
+                      .join("") +
+                    `</div>`
+                  );
+                })()}
                 ${
-                  p.objects_nearby && p.objects_nearby.length
-                    ? `
-                <div class="mt-0.5 text-xs text-gray-600">
-                  📦 ${p.objects_nearby.join(", ")}
-                </div>`
+                  p.face_detected && p.face_crop_path
+                    ? `<div class="mt-1 flex items-center gap-1">
+                         <img src="${API}/face-crop?path=${encodeURIComponent(p.face_crop_path)}"
+                           class="w-6 h-6 rounded-full object-cover border border-green-500/50 bg-gray-800"
+                           onerror="this.style.display='none'" />
+                         <span class="text-xs text-green-400">😊 Face ${p.face_confidence ? (p.face_confidence * 100).toFixed(0) + "%" : ""}</span>
+                       </div>`
                     : ""
                 }
               </div>
@@ -3391,6 +3525,10 @@
           "reading / taking notes": "📖",
           "looking at screen": "🖥",
           "at desk": "🪑",
+          "carrying luggage": "🧳",
+          "carrying backpack": "🎒",
+          "carrying bag": "👜",
+          "carrying bag and backpack": "🎒👜",
         };
         const icon = ACTIVITY_ICONS[item.activity] || "🎯";
         const cropUrl = item.best_crop_path
@@ -3775,6 +3913,10 @@
                     mouse: "🖱",
                     book: "📖",
                     cup: "☕",
+                    backpack: "🎒",
+                    handbag: "👜",
+                    suitcase: "🧳",
+                    bottle: "🍶",
                   };
                   const objs = (s.objects_nearby || [])
                     .map((o) => `${ICONS[o] || "📦"}${o.replace("_", " ")}`)
@@ -3786,7 +3928,19 @@
                       })
                     : "";
                   return `<div class="flex items-center gap-3 px-2 py-1.5 rounded-lg bg-gray-800/40 border border-gray-700 text-xs">
-                  <div class="shrink-0 text-base">${s.activity?.includes("laptop") ? "💻" : s.activity?.includes("phone") ? "📱" : "🎯"}</div>
+                  <div class="shrink-0 text-base">${
+                    s.activity?.includes("laptop")
+                      ? "💻"
+                      : s.activity?.includes("phone")
+                        ? "📱"
+                        : s.activity?.includes("luggage")
+                          ? "🧳"
+                          : s.activity?.includes("backpack")
+                            ? "🎒"
+                            : s.activity?.includes("bag")
+                              ? "👜"
+                              : "🎯"
+                  }</div>
                   <div class="flex-1 min-w-0">
                     <div class="text-white font-medium">${s.activity}</div>
                     ${objs ? `<div class="text-gray-500">${objs}</div>` : ""}

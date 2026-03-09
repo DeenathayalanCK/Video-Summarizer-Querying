@@ -172,3 +172,64 @@ def build_person_rag_text(
         f"appeared at {first_seen:.1f}s, last seen at {last_seen:.1f}s "
         f"(duration: {duration:.1f}s). Detected with {confidence:.0%} confidence."
     )
+
+def build_person_rag_text_live(
+    track_id: int,
+    event_type: str,
+    first_seen_wall: str,    # "HH:MM:SS" wall-clock time
+    last_seen_wall: str,
+    duration: float,
+    confidence: float,
+    person_label: str = "",
+    gender_estimate: str = "unknown",
+    age_estimate: str = "unknown",
+    clothing_top: str = "unknown",
+    clothing_bottom: str = "unknown",
+    head_covering: str = "unknown",
+    carrying: str = "unknown",
+    visible_text: str = "none",
+    objects_nearby: list = None,
+    activity_hint: str = "",
+) -> str:
+    """
+    RAG text for LIVE stream TrackEvents.
+    Uses wall-clock times (e.g. "09:52:25") not video-offset seconds.
+    This fixes Ask queries like "who entered at 9:52?" for live windows.
+    """
+    appearance_parts = []
+    if gender_estimate and gender_estimate != "unknown":
+        appearance_parts.append(gender_estimate)
+    else:
+        appearance_parts.append("person")
+    if age_estimate and age_estimate != "unknown":
+        appearance_parts.append(age_estimate)
+
+    clothing_parts = []
+    if clothing_top and clothing_top != "unknown":
+        clothing_parts.append(f"wearing {clothing_top}")
+    if clothing_bottom and clothing_bottom != "unknown":
+        clothing_parts.append(clothing_bottom)
+    if head_covering and head_covering not in ("unknown", "none"):
+        clothing_parts.append(f"with {head_covering}")
+    if carrying and carrying not in ("unknown", "none"):
+        clothing_parts.append(f"carrying {carrying}")
+    if visible_text and visible_text not in ("unknown", "none"):
+        clothing_parts.append(f'wearing text "{visible_text}"')
+
+    appearance = " ".join(appearance_parts)
+    clothing_str = ", ".join(clothing_parts)
+    if clothing_str:
+        appearance = f"{appearance} ({clothing_str})"
+
+    label_str = f" [{person_label}]" if person_label else ""
+    obj_str = ""
+    if objects_nearby:
+        obj_str = f" Objects detected nearby: {', '.join(objects_nearby)}."
+    act_str = f" Activity: {activity_hint}." if activity_hint and activity_hint != "present" else ""
+
+    return (
+        f"{appearance.capitalize()}{label_str} (track #{track_id}) entered at {first_seen_wall}, "
+        f"last seen at {last_seen_wall} "
+        f"(duration: {duration:.0f}s, confidence: {confidence:.0%})."
+        f"{obj_str}{act_str}"
+    )

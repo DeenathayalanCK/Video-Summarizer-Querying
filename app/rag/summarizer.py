@@ -185,40 +185,33 @@ class VideoSummarizer:
             "options": {"num_ctx": 8192, "num_predict": 800},
         }
 
-        # Summarization sends many tokens (full event block) so it needs more
-        # time than a single-frame caption.  Use caption_timeout_seconds as the
-        # floor but enforce a 600 s ceiling so we don't hang indefinitely.
-        # If the first attempt times out, retry once before giving up.
-        summary_timeout = min(max(self.settings.caption_timeout_seconds, 300), 600)
+        # Retry up to 2 times on transient Ollama errors (cold start, busy)
         last_exc = None
-        for attempt in range(2):
+        summary_text = None
+        for _attempt in range(3):
             try:
                 response = requests.post(
                     f"{self.settings.ollama_host}/api/generate",
                     json=payload,
-                    timeout=summary_timeout,
+                    timeout=(10, self.settings.caption_timeout_seconds),
                 )
                 response.raise_for_status()
-                summary_text = response.json()["response"]
-                break  # success
-            except requests.exceptions.Timeout as exc:
-                self.logger.warning(
-                    "summarize_from_tracks_timeout",
-                    video=video_filename,
-                    attempt=attempt + 1,
-                    timeout=summary_timeout,
-                )
-                last_exc = exc
-                if attempt == 0:
-                    continue  # retry once
-                raise  # second failure — let caller handle
-            except requests.exceptions.RequestException as exc:
-                self.logger.error(
-                    "summarize_from_tracks_request_error",
-                    video=video_filename,
-                    error=str(exc),
-                )
-                raise
+                summary_text = response.json().get("response", "").strip()
+                if summary_text:
+                    break
+            except requests.exceptions.Timeout as e:
+                last_exc = e
+                self.logger.warning("summarize_timeout",
+                                    attempt=_attempt + 1, video=video_filename)
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+                self.logger.warning("summarize_request_error",
+                                    attempt=_attempt + 1, error=str(e))
+        if not summary_text:
+            raise ValueError(
+                f"Summary generation failed for {video_filename}: "
+                f"{last_exc or 'empty response from Ollama'}"
+            )
 
         # Save or update
         if existing:
@@ -300,34 +293,31 @@ class VideoSummarizer:
             "options": {"num_ctx": 8192, "num_predict": 800},
         }
 
-        summary_timeout = min(max(self.settings.caption_timeout_seconds, 300), 600)
-        for attempt in range(2):
+        last_exc = None
+        summary_text = None
+        for _attempt in range(3):
             try:
                 response = requests.post(
                     f"{self.settings.ollama_host}/api/generate",
                     json=payload,
-                    timeout=summary_timeout,
+                    timeout=(10, self.settings.caption_timeout_seconds),
                 )
                 response.raise_for_status()
-                summary_text = response.json()["response"]
-                break
-            except requests.exceptions.Timeout:
-                self.logger.warning(
-                    "summarize_timeout",
-                    video=video_filename,
-                    attempt=attempt + 1,
-                    timeout=summary_timeout,
-                )
-                if attempt == 0:
-                    continue
-                raise
-            except requests.exceptions.RequestException as exc:
-                self.logger.error(
-                    "summarize_request_error",
-                    video=video_filename,
-                    error=str(exc),
-                )
-                raise
+                summary_text = response.json().get("response", "").strip()
+                if summary_text:
+                    break
+            except requests.exceptions.Timeout as e:
+                last_exc = e
+                self.logger.warning("summarize_legacy_timeout", attempt=_attempt + 1)
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+                self.logger.warning("summarize_legacy_error",
+                                    attempt=_attempt + 1, error=str(e))
+        if not summary_text:
+            raise ValueError(
+                f"Summary generation failed for {video_filename}: "
+                f"{last_exc or 'empty response from Ollama'}"
+            )
 
         if existing:
             existing.summary_text = summary_text

@@ -108,9 +108,13 @@ class BaseAttributeExtractor:
                 return None
 
             h, w = img.shape[:2]
-            max_dim = self.settings.caption_max_image_dim  # 768 default
-            if max(h, w) > max_dim:
-                scale = max_dim / max(h, w)
+            # For attribute extraction (person/vehicle crops), 224px is enough
+            # to identify clothing color and type. Larger images massively increase
+            # llava inference time on CPU (576 tokens vs ~64 tokens at 224px).
+            # Use ATTR_MAX_DIM instead of the global caption_max_image_dim.
+            ATTR_MAX_DIM = 224
+            if max(h, w) > ATTR_MAX_DIM:
+                scale = ATTR_MAX_DIM / max(h, w)
                 img = cv2.resize(
                     img,
                     (int(w * scale), int(h * scale)),
@@ -135,8 +139,9 @@ class BaseAttributeExtractor:
             "images": [image_b64],
             "stream": False,
             "options": {
-                "num_predict": 150,   # attributes are short — cap tokens
-                "temperature": 0.05,  # low temp = consistent structured output
+                "num_predict": 80,    # JSON attrs are short — 80 tokens enough
+                "temperature": 0.05, # low temp = consistent structured output
+                "num_ctx": 2048,     # smaller context = faster KV cache on CPU
             },
         }
 
@@ -145,13 +150,20 @@ class BaseAttributeExtractor:
         # is too long — holding an inactive DB connection for 300 s causes the
         # PostgreSQL server to close it, and the subsequent flush() fails with
         # OperationalError, aborting all remaining tracks in the window.
-        attr_timeout = min(self.settings.caption_timeout_seconds, 90)
+        # Cap read timeout at 90s; use separate 5s connect timeout so a
+        # cold/unreachable Ollama fails fast rather than blocking the whole pipeline.
+        attr_timeout = min(self.settings.caption_timeout_seconds, 120)  # 120s — CPU vision models can be slow
+
+        # Skip entirely if no multimodal model configured
+        if not self.model or not self.model.strip():
+            self.logger.info("attribute_extraction_skipped", reason="no_multimodal_model")
+            return None
 
         try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=payload,
-                timeout=attr_timeout,
+                timeout=(5, attr_timeout),   # (connect_timeout, read_timeout)
             )
             response.raise_for_status()
             return response.json().get("response", "")
@@ -160,6 +172,7 @@ class BaseAttributeExtractor:
                 "attribute_extraction_timeout",
                 model=self.model,
                 timeout=attr_timeout,
+                hint="Model too slow for this hardware. Consider minicpm-v or moondream2.",
             )
             return None
         except Exception as e:
@@ -201,6 +214,70 @@ class BaseAttributeExtractor:
             raw_response=text[:200],
         )
         return None
+
+    def _parse_prose_person_attrs(self, text: str) -> dict:
+        """
+        Fallback for models (e.g. moondream2) that return prose instead of JSON.
+        Extracts person attributes using keyword matching on plain-text response.
+        Returns partial dict — missing keys stay "unknown" in the caller.
+        """
+        if not text:
+            return {}
+        t = text.lower()
+        result = {}
+        import re as _re
+
+        if any(w in t for w in [" male", " man ", "boy", " his "]):
+            result["gender_estimate"] = "male"
+        elif any(w in t for w in [" female", " woman ", "girl", " her "]):
+            result["gender_estimate"] = "female"
+
+        if any(w in t for w in ["child", " kid "]):
+            result["age_estimate"] = "child"
+        elif "teen" in t:
+            result["age_estimate"] = "teenager"
+        elif "young adult" in t or "young man" in t or "young woman" in t:
+            result["age_estimate"] = "young adult"
+        elif any(w in t for w in ["senior", "elderly", "older person"]):
+            result["age_estimate"] = "senior"
+        elif "adult" in t:
+            result["age_estimate"] = "adult"
+
+        colors = ["black", "white", "red", "blue", "green", "yellow",
+                  "grey", "gray", "brown", "orange", "purple", "pink",
+                  "navy", "dark blue", "light blue", "dark", "light"]
+        top_garments    = ["jacket", "shirt", "hoodie", "sweater", "t-shirt",
+                           "coat", "blazer", "top", "blouse", "vest", "jumper"]
+        bottom_garments = ["jeans", "trousers", "pants", "shorts", "skirt", "leggings"]
+
+        for color in colors:
+            for garment in top_garments:
+                if color in t and garment in t:
+                    result["clothing_top"] = f"{color} {garment}"
+                    break
+            if "clothing_top" in result:
+                break
+
+        for color in colors:
+            for garment in bottom_garments:
+                if color in t and garment in t:
+                    result["clothing_bottom"] = f"{color} {garment}"
+                    break
+            if "clothing_bottom" in result:
+                break
+
+        for word in ["hat", "cap", "helmet", "hood", "beanie", "turban", "hijab"]:
+            if word in t:
+                result["head_covering"] = word
+                break
+
+        for word in ["backpack", "bag", "handbag", "briefcase",
+                     "luggage", "suitcase", "box", "package"]:
+            if word in t:
+                result["carrying"] = word
+                break
+
+        return result
 
 
 # ── Vehicle extractor ──────────────────────────────────────────────────────────
@@ -309,7 +386,17 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
 
         data = self._extract_json(raw)
         if data is None:
-            return PersonAttributes()
+            # JSON parse failed — try prose extraction (common with moondream2)
+            prose_data = self._parse_prose_person_attrs(raw)
+            if prose_data:
+                self.logger.info(
+                    "person_attribute_prose_fallback",
+                    crop=crop_path,
+                    fields_found=list(prose_data.keys()),
+                )
+                data = prose_data
+            else:
+                return PersonAttributes()
 
         attrs = PersonAttributes(
             gender_estimate=str(data.get("gender_estimate", "unknown")).lower().strip(),

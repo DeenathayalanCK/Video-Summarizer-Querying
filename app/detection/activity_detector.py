@@ -31,13 +31,7 @@ import numpy as np
 from app.core.logging import get_logger
 
 # COCO class IDs → activity-relevant labels
-# Extended for lobby/entrance surveillance:
-#   24=backpack, 26=handbag, 28=suitcase, 39=bottle added for carried-item detection
 ACTIVITY_OBJECTS = {
-    24:  "backpack",
-    26:  "handbag",
-    28:  "suitcase",
-    39:  "bottle",
     41:  "cup",
     62:  "tv_monitor",
     63:  "laptop",
@@ -50,40 +44,26 @@ ACTIVITY_OBJECTS = {
 }
 
 # Activities that warrant every-minute snapshots
-# Extended with transit activities for lobby surveillance
 SNAPSHOT_ACTIVITIES = {
     "working on laptop",
     "using phone",
     "working on laptop, using phone",
     "reading / taking notes",
     "looking at screen",
-    "carrying luggage",
-    "carrying bag and backpack",
-    "carrying backpack",
-    "carrying bag",
 }
 
 
 def infer_activity(objects: list) -> str:
-    """
-    Infer a human-readable activity label from the list of detected nearby objects.
-    Priority order: work tasks > phone > reading > transit > desk presence > present.
-    """
     objs = set(objects)
     if not objs:
         return "present"
-    has_phone    = "cell_phone"  in objs
-    has_laptop   = "laptop"      in objs
-    has_keyboard = "keyboard"    in objs
-    has_book     = "book"        in objs
-    has_cup      = "cup"         in objs
-    has_monitor  = "tv_monitor"  in objs
-    has_backpack = "backpack"    in objs
-    has_handbag  = "handbag"     in objs
-    has_suitcase = "suitcase"    in objs
-    has_bottle   = "bottle"      in objs
+    has_phone    = "cell_phone" in objs
+    has_laptop   = "laptop" in objs
+    has_keyboard = "keyboard" in objs
+    has_book     = "book" in objs
+    has_cup      = "cup" in objs
+    has_monitor  = "tv_monitor" in objs
 
-    # Work activities (highest priority)
     if has_phone and has_laptop:
         return "working on laptop, using phone"
     if has_laptop or (has_keyboard and has_monitor):
@@ -94,19 +74,7 @@ def infer_activity(objects: list) -> str:
         return "reading / taking notes"
     if has_monitor:
         return "looking at screen"
-
-    # Transit / carrying items
-    if has_suitcase:
-        return "carrying luggage"
-    if has_backpack and has_handbag:
-        return "carrying bag and backpack"
-    if has_backpack:
-        return "carrying backpack"
-    if has_handbag:
-        return "carrying bag"
-
-    # Desk/stationary presence
-    if has_cup or has_bottle:
+    if has_cup:
         return "at desk"
     return "present"
 
@@ -129,20 +97,13 @@ class ActivityDetector:
     def detect_on_context(
         self,
         frame: np.ndarray,
-        bbox: tuple,                  # (x1, y1, x2, y2) in pixel coords
-        expand_x: float = 3.0,        # horizontal expand — catches shoulder bags
-        expand_y: float = 2.0,        # vertical expand — catches items held at waist
-        confidence: float = 0.30,     # lower than default — small objects in crops
+        bbox: tuple,               # (x1, y1, x2, y2) in pixel coords
+        expand: float = 2.5,       # expand factor around person bbox
+        confidence: float = 0.30,  # lower than default — small objects in crops
     ) -> tuple:
         """
-        Expand the person bbox asymmetrically and crop from the full frame,
-        then run YOLO restricted to ACTIVITY_OBJECTS classes.
-
-        Asymmetric expand rationale (lobby/door surveillance):
-          - expand_x=3.0: backpacks and handbags are carried on the side/shoulder;
-            a wider horizontal crop ensures they are within the detection area.
-          - expand_y=2.0: items held at waist height (phone, cup, bottle) need
-            only modest vertical expansion beyond the person bbox.
+        Expand the person bbox by `expand` factor, crop from full frame,
+        run YOLO restricted to ACTIVITY_OBJECTS classes.
 
         Returns (object_list, activity_hint).
         """
@@ -155,9 +116,9 @@ class ActivityDetector:
             bw = x2 - x1
             bh = y2 - y1
 
-            # Asymmetric expand — wider horizontal for shoulder/carried items
-            pad_x = bw * (expand_x - 1) / 2
-            pad_y = bh * (expand_y - 1) / 2
+            # Expand symmetrically — include desk area above/below/sides
+            pad_x = bw * (expand - 1) / 2
+            pad_y = bh * (expand - 1) / 2
             ex1 = max(0,  int(x1 - pad_x))
             ey1 = max(0,  int(y1 - pad_y))
             ex2 = min(w,  int(x2 + pad_x))
@@ -230,7 +191,7 @@ class ActivityCaptioner:
                     "stream": False,
                     "options": {"num_predict": 30, "temperature": 0.1},
                 },
-                timeout=30,
+                timeout=(5, 60),  # (connect_timeout, read_timeout)
             )
             if resp.status_code == 200:
                 raw     = resp.json().get("response", "").strip()
@@ -306,15 +267,30 @@ def write_activity_snapshot(track, window_key: str, wall_time: datetime, db):
 def run_activity_captions_for_window(video_filename: str, db) -> int:
     """
     Post-window: minicpm-v caption for every entry TrackEvent that has a crop.
+
+    Safety limits:
+    - Per-call: 60s read timeout (in ActivityCaptioner.caption)
+    - Total budget: 180s wall-clock for all captions in one window
+      (prevents the pipeline from stalling here if Ollama is cold/busy)
+    - Skips if multimodal_model is not configured or unavailable
     Returns count of captions written.
     """
+    import time as _time
     from app.storage.models import TrackEvent
     from app.core.config import get_settings
 
-    s         = get_settings()
-    captioner = ActivityCaptioner(ollama_host=s.ollama_host, model=s.multimodal_model)
-    logger    = get_logger()
-    events    = (
+    s = get_settings()
+    # Skip if no multimodal model configured — avoids hanging on every track
+    if not s.multimodal_model or s.multimodal_model.strip() == "":
+        get_logger().info("activity_captions_skipped", reason="no_multimodal_model")
+        return 0
+
+    captioner  = ActivityCaptioner(ollama_host=s.ollama_host, model=s.multimodal_model)
+    logger     = get_logger()
+    BUDGET_SEC = 180  # max wall-clock seconds for all captions in this window
+    t_start    = _time.monotonic()
+
+    events = (
         db.query(TrackEvent)
         .filter(
             TrackEvent.video_filename == video_filename,
@@ -324,6 +300,12 @@ def run_activity_captions_for_window(video_filename: str, db) -> int:
     )
     captioned = 0
     for ev in events:
+        # Enforce total budget — stop early if we're over time
+        if _time.monotonic() - t_start > BUDGET_SEC:
+            logger.warning("activity_captions_budget_exceeded",
+                           video=video_filename, captioned=captioned,
+                           elapsed=round(_time.monotonic() - t_start))
+            break
         if not ev.best_crop_path or not os.path.exists(ev.best_crop_path):
             continue
         if ev.attributes and ev.attributes.get("activity_caption"):

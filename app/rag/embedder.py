@@ -20,13 +20,25 @@ class OllamaEmbedder:
             "model": self.model,
             "prompt": text,
         }
-        response = requests.post(
-            f"{self.base_url}/api/embeddings",
-            json=payload,
-            timeout=60,
-        )
-        response.raise_for_status()
-        return response.json()["embedding"]
+        last_exc = None
+        for _attempt in range(3):
+            try:
+                response = requests.post(
+                    f"{self.base_url}/api/embeddings",
+                    json=payload,
+                    timeout=(5, 60),   # (connect_timeout, read_timeout)
+                )
+                response.raise_for_status()
+                return response.json()["embedding"]
+            except requests.exceptions.Timeout as e:
+                last_exc = e
+                self.logger.warning("embed_timeout", attempt=_attempt + 1)
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+                self.logger.warning("embed_request_error",
+                                    attempt=_attempt + 1, error=str(e))
+        self.logger.error("embed_failed_all_attempts", error=str(last_exc))
+        return None
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]

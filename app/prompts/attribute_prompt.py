@@ -1,79 +1,48 @@
 """
-Phase 6B: Attribute extraction prompts for minicpm-v.
+Phase 6B: Attribute extraction prompts.
 
-Design principles:
-- Ask for JSON output only — no prose, no preamble
-- Short, specific fields — minicpm-v on CPU is ~30s/crop, we don't want essays
-- Use "unknown" as the null value — easier to filter than None in RAG text
-- Keep prompts tight — fewer tokens = faster inference
+Model strategy:
+- Primary: moondream2 (1.7GB, CPU-optimized, ~15-30s per crop on CPU)
+- Fallback: minicpm-v / llava (heavier, GPU recommended)
+
+moondream2 works best with SHORT, direct questions — NOT complex JSON schemas.
+We ask one simple question and parse the plain-text answer into structured fields.
+This avoids JSON parse failures that are common with moondream2's output style.
 """
 
 # ── Vehicle attribute extraction ───────────────────────────────────────────────
 
-VEHICLE_ATTRIBUTE_PROMPT = """You are analyzing a cropped image of a vehicle from a security camera.
-
-Respond ONLY with a valid JSON object. No explanation, no markdown, no extra text.
-
-JSON fields:
-- "color": dominant color of the vehicle body (e.g. "white", "black", "silver", "red", "blue", "grey", "unknown")
-- "type": vehicle body style (choose one: "sedan", "suv", "van", "truck", "bus", "motorcycle", "bicycle", "hatchback", "pickup", "unknown")
-- "make_estimate": manufacturer if visible (e.g. "Toyota", "Ford", "unknown") — only if clearly identifiable, otherwise "unknown"
-- "plate_visible": true or false — is any license plate visible?
-
-Example output:
-{"color": "white", "type": "van", "make_estimate": "unknown", "plate_visible": false}
-
-Now analyze the vehicle in this image:"""
-
+VEHICLE_ATTRIBUTE_PROMPT = """Analyze this security camera crop of a vehicle.
+Reply with ONLY a JSON object, no other text.
+{"color": "dominant body color or unknown", "type": "sedan|suv|van|truck|bus|motorcycle|bicycle|hatchback|pickup|unknown", "make_estimate": "brand if visible or unknown", "plate_visible": true or false}
+Example: {"color": "white", "type": "van", "make_estimate": "unknown", "plate_visible": false}"""
 
 
 # ── License plate OCR ─────────────────────────────────────────────────────────
 
-PLATE_OCR_PROMPT = """You are reading a license plate from a security camera image of a vehicle.
+PLATE_OCR_PROMPT = """Read the license plate in this image.
+Reply with ONLY: {"plate_number": "the text or unknown"}"""
 
-Your ONLY job is to read the license plate number/text exactly as it appears.
-
-Rules:
-- Look carefully at the plate area — it may be partially visible or at an angle
-- Read characters left-to-right exactly as printed
-- Include letters, numbers, spaces, and hyphens as they appear
-- Do NOT guess or invent characters you cannot read clearly
-- If the plate is too blurry, occluded, or unreadable, output: {"plate_number": "unknown"}
-
-Respond ONLY with a valid JSON object. No explanation, no preamble.
-
-JSON field:
-- "plate_number": the exact plate text (e.g. "TN 09 AB 1234", "KA-01-MF-7890", "unknown")
-
-Examples:
-{"plate_number": "TN 09 AB 1234"}
-{"plate_number": "KA 01 MF 7890"}
-{"plate_number": "unknown"}
-
-Now read the license plate in this image:"""
 
 # ── Person attribute extraction ────────────────────────────────────────────────
+# Designed for moondream2 and minicpm-v on CPU.
+# Shorter prompt = fewer input tokens = faster inference.
+# Plain-text fallback parser handles non-JSON responses from moondream2.
 
-PERSON_ATTRIBUTE_PROMPT = """You are analyzing a cropped image of a person from a security camera.
-
-Respond ONLY with a valid JSON object. No explanation, no markdown, no extra text.
-
-JSON fields:
-- "gender_estimate": "male", "female", or "unknown" — only if clearly visible
-- "clothing_top": color and type of upper body clothing (e.g. "black jacket", "white shirt", "unknown")
-- "clothing_bottom": color and type of lower body clothing (e.g. "blue jeans", "dark trousers", "unknown")
-- "head_covering": any hat, helmet, hood, or "none" or "unknown"
-- "carrying": any visible bags, backpacks, objects or "none" or "unknown"
-- "age_estimate": approximate age bracket — choose one: "child" (under 13), "teenager" (13-18), "young adult" (18-30), "adult" (30-55), "senior" (55+), or "unknown". Base on body size, posture, and hair if visible. Do NOT base on face alone.
-- "visible_text": any readable text ON clothing, badges, vests, hats (e.g. "SECURITY", "POLICE", "STAFF", a name or number). Use "none" if no text is visible.
-
-Example output:
-{"gender_estimate": "male", "age_estimate": "adult", "clothing_top": "white shirt", "clothing_bottom": "dark trousers", "head_covering": "none", "carrying": "none", "visible_text": "SECURITY"}
-
-Now analyze the person in this image:"""
+PERSON_ATTRIBUTE_PROMPT = """Describe this person from a security camera image.
+Reply with ONLY a JSON object, no other text.
+{"gender_estimate": "male|female|unknown", "age_estimate": "child|teenager|young adult|adult|senior|unknown", "clothing_top": "color and type or unknown", "clothing_bottom": "color and type or unknown", "head_covering": "hat/helmet/hood/none/unknown", "carrying": "bags/backpack/object or none", "visible_text": "text on clothing or none"}
+Example: {"gender_estimate": "male", "age_estimate": "adult", "clothing_top": "black jacket", "clothing_bottom": "blue jeans", "head_covering": "none", "carrying": "backpack", "visible_text": "none"}"""
 
 
-# ── RAG text builders — called after attributes are extracted ──────────────────
+# ── Moondream2 fallback: plain-text question ──────────────────────────────────
+# moondream2 often ignores JSON instructions and returns plain text.
+# This prompt gets a prose answer we parse with _parse_moondream_person().
+
+PERSON_ATTRIBUTE_PROMPT_SIMPLE = """Describe the person in this image briefly: gender, approximate age, top clothing color and type, bottom clothing color and type, any hat or head covering, anything they are carrying, any visible text on their clothing."""
+
+
+# ── RAG text builders ─────────────────────────────────────────────────────────
 
 def build_vehicle_rag_text(
     track_id: int,
@@ -88,16 +57,6 @@ def build_vehicle_rag_text(
     make_estimate: str = "unknown",
     plate_number: str = "unknown",
 ) -> str:
-    """
-    Build enriched RAG text for a vehicle TrackEvent.
-    Called after Phase 6B attributes are extracted.
-
-    Format designed to match natural language queries like:
-      "red van that entered"
-      "white Toyota near gate"
-      "vehicle present for 30 seconds"
-    """
-    # Build description prefix — skip "unknown" values to keep text clean
     parts = []
     if color and color != "unknown":
         parts.append(color)
@@ -132,16 +91,6 @@ def build_person_rag_text(
     carrying: str = "unknown",
     visible_text: str = "none",
 ) -> str:
-    """
-    Build enriched RAG text for a person TrackEvent.
-    Called after Phase 6B attributes are extracted.
-
-    Format designed to match natural language queries like:
-      "person in black jacket"
-      "male with backpack"
-      "person who entered at 30 seconds"
-    """
-    # Build appearance description
     appearance_parts = []
     if gender_estimate and gender_estimate != "unknown":
         appearance_parts.append(gender_estimate)
@@ -173,14 +122,14 @@ def build_person_rag_text(
         f"(duration: {duration:.1f}s). Detected with {confidence:.0%} confidence."
     )
 
+
 def build_person_rag_text_live(
-    track_id: int,
+    person_label: str,
     event_type: str,
-    first_seen_wall: str,    # "HH:MM:SS" wall-clock time
-    last_seen_wall: str,
+    entry_wall_time: str,
+    exit_wall_time: str,
     duration: float,
     confidence: float,
-    person_label: str = "",
     gender_estimate: str = "unknown",
     age_estimate: str = "unknown",
     clothing_top: str = "unknown",
@@ -188,14 +137,7 @@ def build_person_rag_text_live(
     head_covering: str = "unknown",
     carrying: str = "unknown",
     visible_text: str = "none",
-    objects_nearby: list = None,
-    activity_hint: str = "",
 ) -> str:
-    """
-    RAG text for LIVE stream TrackEvents.
-    Uses wall-clock times (e.g. "09:52:25") not video-offset seconds.
-    This fixes Ask queries like "who entered at 9:52?" for live windows.
-    """
     appearance_parts = []
     if gender_estimate and gender_estimate != "unknown":
         appearance_parts.append(gender_estimate)
@@ -221,15 +163,13 @@ def build_person_rag_text_live(
     if clothing_str:
         appearance = f"{appearance} ({clothing_str})"
 
-    label_str = f" [{person_label}]" if person_label else ""
-    obj_str = ""
-    if objects_nearby:
-        obj_str = f" Objects detected nearby: {', '.join(objects_nearby)}."
-    act_str = f" Activity: {activity_hint}." if activity_hint and activity_hint != "present" else ""
+    time_str = f"entered at {entry_wall_time}"
+    if exit_wall_time:
+        time_str += f", exited at {exit_wall_time}"
+    if duration > 0:
+        time_str += f" (duration: {duration:.0f}s)"
 
     return (
-        f"{appearance.capitalize()}{label_str} (track #{track_id}) entered at {first_seen_wall}, "
-        f"last seen at {last_seen_wall} "
-        f"(duration: {duration:.0f}s, confidence: {confidence:.0%})."
-        f"{obj_str}{act_str}"
+        f"{appearance.capitalize()} ({person_label}) {event_type} event: "
+        f"{time_str}. Detected with {confidence:.0%} confidence."
     )

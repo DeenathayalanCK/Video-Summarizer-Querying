@@ -248,32 +248,43 @@ def reset_identities(db: Session = Depends(get_db)):
 
 @router.get("/crop/{person_label}")
 def get_crop(person_label: str, db: Session = Depends(get_db)):
-    """Return the best crop image for a person label."""
-    crop_path = None
-
-    # Primary: DB-persisted best crop
+    """
+    Return the best crop image for a person label.
+    Falls back to newest file in live_crops matching the label if DB path is stale
+    (happens when the container restarted and the named volume was recreated).
+    """
+    from app.core.config import get_settings as _gs
     identity = db.query(PersonIdentity).filter(
         PersonIdentity.person_label == person_label).first()
-    if identity and identity.best_crop_path and os.path.exists(identity.best_crop_path):
-        crop_path = identity.best_crop_path
 
-    # Fallback: in-memory live track (handles the window between crop save and
-    # DB commit, and the tmp-rename bug on older DB records).
-    if not crop_path:
-        proc = LiveStreamProcessor.get_instance()
-        for t in proc.get_active_tracks():
-            if t["person_label"] == person_label and t.get("best_crop_path"):
-                if os.path.exists(t["best_crop_path"]):
-                    crop_path = t["best_crop_path"]
-                    break
+    # Try DB path first
+    crop_path = identity.best_crop_path if identity else None
+    if crop_path and os.path.exists(crop_path):
+        return FileResponse(crop_path, media_type="image/jpeg",
+                            headers={"Cache-Control": "max-age=30"})
 
-    if not crop_path:
-        raise HTTPException(status_code=404, detail="No crop available")
-    return FileResponse(
-        crop_path,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "max-age=30"},
-    )
+    # Fallback: scan live_crops dir for most recent file matching label prefix
+    try:
+        crops_dir = _gs().live_crops_path
+        prefix    = person_label + "_"
+        matches   = [
+            os.path.join(crops_dir, f)
+            for f in os.listdir(crops_dir)
+            if f.startswith(prefix) and f.endswith(".jpg") and "_face" not in f
+        ]
+        if matches:
+            newest = max(matches, key=os.path.getmtime)
+            # Update DB so next request hits cache
+            if identity:
+                identity.best_crop_path = newest
+                try: db.commit()
+                except Exception: db.rollback()
+            return FileResponse(newest, media_type="image/jpeg",
+                                headers={"Cache-Control": "max-age=10"})
+    except Exception:
+        pass
+
+    raise HTTPException(status_code=404, detail="No crop available for " + person_label)
 
 
 # ── Person history detail ────────────────────────────────────────────────────

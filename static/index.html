@@ -998,6 +998,8 @@
       // ── Init ───────────────────────────────────────────────────────────────────────
 
       let _appMode = "batch"; // "live" | "batch"
+      let _livePollTimer = null; // setInterval handle for live polling
+      let _liveRunning = false; // true once live stream has been started
 
       async function init() {
         // Health check
@@ -1027,10 +1029,13 @@
         // In live mode, auto-open Live tab and start polling
         if (_appMode === "live") {
           showTab("live");
-          // Trigger stream start (no-op if already running)
-          try {
-            await apiFetch("/live/start", { method: "POST" });
-          } catch (e) {}
+          // Trigger stream start only if not already running
+          if (!_liveRunning && !window._liveStarting) {
+            try {
+              await apiFetch("/live/start", { method: "POST" });
+              _liveRunning = true;
+            } catch (e) {}
+          }
           const img = document.getElementById("live-stream-img");
           if (img) {
             img.src = API + "/live/stream?" + Date.now();
@@ -1164,7 +1169,7 @@
                 API +
                 "/live/crop/" +
                 encodeURIComponent(p.person_label) +
-                "?" +
+                "?t=" +
                 Math.floor(Date.now() / 10000);
               return `
               <button onclick="liveSubTab('history'); openPersonModal('${p.person_label}')"
@@ -2099,8 +2104,10 @@
             // The spine dot only shows once per unique second
             const showDot = i === 0 || entries[i - 1].second !== e.second;
 
-            const trackLabel =
-              e.track_id !== null
+            // Prefer person_label (P19, P32…) for live ReID tracks; fall back to raw track_id
+            const trackLabel = e.person_label
+              ? `<span class="text-indigo-400 font-medium">${e.person_label}</span>`
+              : e.track_id !== null
                 ? `<span class="text-gray-600">#${e.track_id}</span>`
                 : "";
             const clsLabel =
@@ -2368,6 +2375,24 @@
         }
         if (parts.length) {
           html += `<div class="text-xs text-yellow-400 mt-1 break-words leading-relaxed">${parts.join(" · ")}</div>`;
+        } else if (
+          cls === "person" ||
+          cls === "car" ||
+          cls === "truck" ||
+          cls === "motorcycle" ||
+          cls === "bicycle"
+        ) {
+          if (attrs.attr_attempted) {
+            html += `<div class="text-xs text-gray-600 mt-1 italic">— no details extracted —</div>`;
+          } else {
+            html += `<div class="text-xs text-gray-500 mt-1">⏳ analyzing...</div>`;
+          }
+        } else if (
+          (cls === "person" || attrs.person_label) &&
+          !attrs.activity_caption
+        ) {
+          // Attributes exist but all values are "unknown" (model timed out or still processing)
+          html += `<div class="text-xs text-gray-600 italic mt-1">🔍 analysing...</div>`;
         }
 
         // Activity caption (from minicpm-v post-processing)
@@ -2428,6 +2453,69 @@
 
       // ── Detections ─────────────────────────────────────────────────────────────────
 
+      // ── Track card crop helper (extracted from IIFE to avoid nested backtick bugs) ───
+      function buildTrackCropHtml(t) {
+        var attrs = t.attributes || {};
+        var faceDetected =
+          t.face_detected != null
+            ? t.face_detected
+            : attrs.face_detected || false;
+        var faceCropPath =
+          t.face_crop_path != null
+            ? t.face_crop_path
+            : attrs.face_crop_path || null;
+        var faceConf =
+          t.face_confidence != null
+            ? t.face_confidence
+            : attrs.face_confidence || 0;
+        var personUrl = t.best_crop_path
+          ? "/api/v1/crop?path=" + encodeURIComponent(t.best_crop_path)
+          : null;
+        var faceUrl =
+          faceDetected && faceCropPath
+            ? "/api/v1/face-crop?path=" + encodeURIComponent(faceCropPath)
+            : null;
+        var noFaceBadge = attrs.face_method
+          ? '<span class="absolute bottom-1 right-1 text-xs bg-black/70 rounded px-1 text-gray-400">no face</span>'
+          : "";
+        if (faceUrl && personUrl) {
+          var conf = faceConf ? (faceConf * 100).toFixed(0) + "%" : "";
+          return (
+            '<div class="flex gap-1.5 h-28">' +
+            '<img src="' +
+            personUrl +
+            '" class="flex-1 h-full object-cover rounded-lg bg-gray-800 min-w-0" onerror="this.style.display=\'none\'" />' +
+            '<div class="flex flex-col items-center gap-1 shrink-0 justify-center">' +
+            '<img src="' +
+            faceUrl +
+            '" class="w-16 h-20 object-cover object-top rounded-lg border-2 border-green-500 bg-gray-800 shadow-lg" onerror="this.parentElement.style.display=\'none\'" title="Face ' +
+            conf +
+            '" />' +
+            '<span class="text-xs text-green-400 font-bold">' +
+            conf +
+            "</span>" +
+            "</div></div>"
+          );
+        }
+        if (faceUrl) {
+          return (
+            '<img src="' +
+            faceUrl +
+            '" class="w-full h-28 object-cover object-top rounded-lg border-2 border-green-500 bg-gray-800" onerror="this.style.display=\'none\'" />' +
+            '<div class="absolute top-1 right-1 bg-green-600/80 rounded px-1 text-xs text-white">face</div>'
+          );
+        }
+        if (personUrl) {
+          return (
+            '<img src="' +
+            personUrl +
+            '" class="w-full h-28 object-cover rounded-lg bg-gray-800" onerror="this.style.display=\'none\'" />' +
+            noFaceBadge
+          );
+        }
+        return '<div class="w-full h-28 bg-gray-800 rounded-lg flex items-center justify-center text-gray-600 text-xs">no crop</div>';
+      }
+
       async function doDetections() {
         const video = document.getElementById("detections-video-select").value;
         if (!video) return;
@@ -2456,62 +2544,16 @@
                                 (t) => `
                               <div class="glass rounded-xl p-3 fade-in">
                                 <div class="relative mb-2">
-                                  ${(() => {
-                                    // Use top-level face fields (populated by routes fix8)
-                                    // falling back to attributes for compatibility
-                                    const attrs = t.attributes || {};
-                                    const faceDetected =
-                                      t.face_detected ??
-                                      attrs.face_detected ??
-                                      false;
-                                    const faceCropPath =
-                                      t.face_crop_path ??
-                                      attrs.face_crop_path ??
-                                      null;
-                                    const faceConf =
-                                      t.face_confidence ??
-                                      attrs.face_confidence ??
-                                      0;
-                                    const personUrl = t.best_crop_path
-                                      ? `/api/v1/crop?path=${encodeURIComponent(t.best_crop_path)}`
-                                      : null;
-                                    const faceUrl =
-                                      faceDetected && faceCropPath
-                                        ? `/api/v1/face-crop?path=${encodeURIComponent(faceCropPath)}`
-                                        : null;
-                                    if (faceUrl && personUrl) {
-                                      const conf = faceConf
-                                        ? (faceConf * 100).toFixed(0) + "%"
-                                        : "";
-                                      return `
-                                        <div class="flex gap-1.5 h-28">
-                                          <img src="${personUrl}" class="flex-1 h-full object-cover rounded-lg bg-gray-800 min-w-0" onerror="this.style.display='none'" />
-                                          <div class="flex flex-col items-center gap-1 shrink-0 justify-center">
-                                            <img src="${faceUrl}"
-                                              class="w-16 h-20 object-cover object-top rounded-lg border-2 border-green-500 bg-gray-800 shadow-lg"
-                                              onerror="this.parentElement.style.display='none'"
-                                              title="Face detected ${conf}" />
-                                            <span class="text-xs text-green-400 font-bold">😊 ${conf}</span>
-                                          </div>
-                                        </div>`;
-                                    } else if (faceUrl) {
-                                      return `<img src="${faceUrl}" class="w-full h-28 object-cover object-top rounded-lg border-2 border-green-500 bg-gray-800" onerror="this.style.display='none'" />
-                                        <div class="absolute top-1 right-1 bg-green-600/80 rounded px-1 text-xs text-white">😊 face</div>`;
-                                    } else if (personUrl) {
-                                      return (
-                                        `<img src="${personUrl}" class="w-full h-28 object-cover rounded-lg bg-gray-800" onerror="this.style.display='none'" />` +
-                                        (attrs.face_method
-                                          ? `<span class="absolute bottom-1 right-1 text-xs bg-black/70 rounded px-1 text-gray-400">😶 no face</span>`
-                                          : "")
-                                      );
-                                    }
-                                    return `<div class="w-full h-28 bg-gray-800 rounded-lg flex items-center justify-center text-gray-600 text-xs">no crop</div>`;
-                                  })()}
+                                  ${buildTrackCropHtml(t)}
                                 </div>
-                                <div class="text-xs font-medium text-indigo-300">
-                                  ${t.person_label || (t.attributes && t.attributes.person_label) || t.object_class}
+                                <div class="text-xs font-medium">
+                                  ${
+                                    t.attributes && t.attributes.person_label
+                                      ? `<span class="text-indigo-300 font-semibold">${t.attributes.person_label}</span><span class="text-gray-600 text-xs ml-1">· #${t.track_id}</span>`
+                                      : `<span class="text-indigo-300">${t.object_class}</span><span class="text-gray-600 text-xs ml-1">#${t.track_id}</span>`
+                                  }
                                 </div>
-                                <div class="text-xs text-gray-500">Track #${t.track_id} · ${t.event_type}</div>
+                                <div class="text-xs text-gray-500">${t.event_type}</div>
                                 <div class="text-xs text-gray-600">
                                   ${
                                     t.entry_wall_time ||
@@ -2560,19 +2602,51 @@
                               .map(
                                 (d) => `
                               <div class="glass rounded-xl p-3 fade-in">
-                                ${
-                                  d.crop_path
-                                    ? `
-                                  <img src="/api/v1/crop?path=${encodeURIComponent(d.crop_path)}"
-                                    class="w-full h-24 object-cover rounded-lg bg-gray-800 mb-2"
-                                    onerror="this.style.display='none'" />
-                                `
-                                    : `<div class="w-full h-24 bg-gray-800 rounded-lg mb-2 flex items-center justify-center text-gray-600 text-xs">no crop</div>`
-                                }
-                                <div class="text-xs font-medium text-indigo-300">${d.object_class}</div>
-                                <div class="text-xs text-gray-500">@ ${fmt(d.second)} · ${d.quadrant}</div>
+                                <div class="relative mb-2">
+                                  ${(() => {
+                                    const attrs = d.attributes || {};
+                                    const faceDetected =
+                                      attrs.face_detected ?? false;
+                                    const facePath =
+                                      attrs.face_crop_path ?? null;
+                                    // Prefer best_crop_path (TrackEvent) over crop_path (raw frame)
+                                    const personUrl =
+                                      d.best_crop_path || d.crop_path
+                                        ? `/api/v1/crop?path=${encodeURIComponent(d.best_crop_path || d.crop_path)}`
+                                        : null;
+                                    const faceUrl =
+                                      faceDetected && facePath
+                                        ? `/api/v1/face-crop?path=${encodeURIComponent(facePath)}`
+                                        : null;
+                                    if (faceUrl && personUrl) {
+                                      const conf = attrs.face_confidence
+                                        ? (attrs.face_confidence * 100).toFixed(
+                                            0,
+                                          ) + "%"
+                                        : "";
+                                      return `<div class="flex gap-1.5 h-24">
+                                        <img src="${personUrl}" class="flex-1 h-full object-cover rounded-lg bg-gray-800 min-w-0" onerror="this.style.display='none'" />
+                                        <div class="flex flex-col items-center gap-0.5 shrink-0 justify-center">
+                                          <img src="${faceUrl}" class="w-14 h-18 object-cover object-top rounded-lg border-2 border-green-500 bg-gray-800" onerror="this.parentElement.style.display='none'" />
+                                          <span class="text-xs text-green-400 font-bold">😊 ${conf}</span>
+                                        </div>
+                                      </div>`;
+                                    } else if (personUrl) {
+                                      return `<img src="${personUrl}" class="w-full h-24 object-cover rounded-lg bg-gray-800" onerror="this.style.display='none'" />`;
+                                    }
+                                    return `<div class="w-full h-24 bg-gray-800 rounded-lg flex items-center justify-center text-gray-600 text-xs">no crop</div>`;
+                                  })()}
+                                </div>
+                                <div class="text-xs font-medium text-indigo-300">
+                                  ${(d.attributes && d.attributes.person_label) || d.object_class}
+                                </div>
+                                <div class="text-xs text-gray-500">@ ${fmtAny(d.second)} · ${d.quadrant || ""}</div>
                                 <div class="text-xs text-gray-600">conf: ${(d.confidence * 100).toFixed(0)}% · track #${d.track_id ?? "?"}</div>
-                                ${d.attributes ? renderAttributes(d.attributes) : ""}
+                                ${
+                                  d.attributes
+                                    ? renderAttributes(d.attributes)
+                                    : `<div class="mt-1 text-xs text-gray-700 italic">⏳ attrs pending</div>`
+                                }
                               </div>
                             `,
                               )
@@ -3208,15 +3282,16 @@
       // LIVE STREAM  ─  polling + MJPEG controls
       // ══════════════════════════════════════════════════════════════════════
 
-      let _livePollTimer = null;
-      let _liveRunning = false;
-
       async function liveStart() {
+        // Guard: prevent duplicate starts from rapid clicks or auto-init
+        if (_liveRunning || window._liveStarting) return;
+        window._liveStarting = true;
         try {
           await apiFetch("/live/start", { method: "POST" });
         } catch (e) {
           // 400 = already running — that's fine
         }
+        window._liveStarting = false;
         _liveRunning = true;
 
         // Wire MJPEG stream into img tag
@@ -3367,7 +3442,7 @@
               API +
               "/live/crop/" +
               encodeURIComponent(p.person_label) +
-              "?" +
+              "?t=" +
               Math.floor(Date.now() / 5000);
             return `
             <div class="glass rounded-xl p-3 flex gap-3 items-center border"

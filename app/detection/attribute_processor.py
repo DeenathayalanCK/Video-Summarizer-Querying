@@ -141,22 +141,29 @@ class AttributeProcessor:
                     crop=crop_path,
                 )
 
-                # ── Skip if already attempted for this crop in a previous window ─────
-                # Use "attr_attempted" sentinel written after any extraction attempt.
-                # This prevents re-running minicpm-v every window even when it timed out.
-                # A timed-out result writes sentinel but not meaningful attrs.
+                # ── Skip if already attributed with full LLM data ────────────────
+                # attr_attempted=True + attr_has_data=True → fully done, skip.
+                # attr_attempted=True + attr_has_data=False + attr_tier1_only=True
+                #   → Tier-1 CV was done but LLM timed out. Already has color data.
+                #   → Skip (color already stored, no point retrying LLM on same crop).
+                # attr_attempted=True + attr_has_data=False + no tier1_only flag
+                #   → old-style timeout sentinel (before tier-1 was added).
+                #   → Retry so we at least get tier-1 CV color.
                 existing_attrs = entry_event.attributes or {}
                 if existing_attrs.get("attr_attempted"):
-                    self.logger.info(
-                        "attribute_processor_cache_hit",
-                        video=video_filename,
-                        track_id=track_id,
-                        object_class=object_class,
-                        has_data=existing_attrs.get("attr_has_data", False),
-                    )
-                    already_attributed.add(track_id)
-                    attributed_count += 1
-                    continue
+                    if existing_attrs.get("attr_has_data") or existing_attrs.get("attr_tier1_only"):
+                        self.logger.info(
+                            "attribute_processor_cache_hit",
+                            video=video_filename,
+                            track_id=track_id,
+                            object_class=object_class,
+                            has_data=existing_attrs.get("attr_has_data", False),
+                            tier1_only=existing_attrs.get("attr_tier1_only", False),
+                        )
+                        already_attributed.add(track_id)
+                        attributed_count += 1
+                        continue
+                    # else: old sentinel with no tier-1 data → fall through and retry
 
                 # ── Extract attributes ─────────────────────────────────────────────
                 vehicle_attrs: Optional[VehicleAttributes] = None
@@ -171,6 +178,7 @@ class AttributeProcessor:
                             merged = dict(ev.attributes or {})
                             merged["attr_attempted"] = True
                             merged["attr_has_data"] = False
+                            merged["attr_tier1_only"] = False
                             merged["object_class"] = object_class
                             ev.attributes = merged
                             from sqlalchemy.orm.attributes import flag_modified as _fm
@@ -207,14 +215,36 @@ class AttributeProcessor:
 
                 elif object_class in PERSON_CLASSES:
                     person_attrs = self.person_extractor.extract(crop_path)
+
+                    # ── Wire YOLO carrying/hat from nearby-object detections ──────
+                    # YOLO already detects backpack (24), handbag (26), suitcase (28)
+                    # during frame processing. Pull those from DetectedObject rows
+                    # that share this track_id and inject into person_attrs.carrying
+                    # if LLM didn't extract anything better.
+                    yolo_carrying = self._get_yolo_carrying(video_filename, track_id)
+                    yolo_hat      = self._get_yolo_hat(video_filename, track_id)
+
+                    if yolo_carrying and person_attrs.carrying in ("unknown", "none", ""):
+                        person_attrs.carrying = yolo_carrying
+                        self.logger.info(
+                            "attribute_yolo_carrying_wired",
+                            track_id=track_id, carrying=yolo_carrying)
+
+                    if yolo_hat and person_attrs.head_covering in ("unknown", "none", ""):
+                        person_attrs.head_covering = yolo_hat
+                        self.logger.info(
+                            "attribute_yolo_hat_wired",
+                            track_id=track_id, hat=yolo_hat)
+
                     if not person_attrs.has_data:
-                        # Extraction timed out or model returned all-unknown.
-                        # Write sentinel so we don't retry on every window close,
-                        # but skip writing all-unknown attrs (useless noise).
+                        # Tier-1 CV got nothing AND LLM failed/timed out.
+                        # Write sentinel with tier1_only=False so we could retry
+                        # if we want, but mark attempted to avoid hot loop.
                         for ev in all_events_by_track.get(track_id, []):
                             merged = dict(ev.attributes or {})
                             merged["attr_attempted"] = True
                             merged["attr_has_data"] = False
+                            merged["attr_tier1_only"] = False
                             merged["object_class"] = object_class
                             ev.attributes = merged
                             from sqlalchemy.orm.attributes import flag_modified as _fm
@@ -230,10 +260,13 @@ class AttributeProcessor:
                         )
                         continue
 
+                    # Mark whether we have full LLM data or just CV tier-1
+                    has_llm = person_attrs.gender_estimate not in ("unknown", "")
                     attributes_dict = person_attrs.to_dict()
                     attributes_dict["object_class"] = object_class
                     attributes_dict["attr_attempted"] = True
                     attributes_dict["attr_has_data"] = True
+                    attributes_dict["attr_tier1_only"] = not has_llm
 
                     new_rag_text = build_person_rag_text(
                         track_id=track_id,
@@ -379,6 +412,70 @@ class AttributeProcessor:
             total_tracks=len(entry_events),
         )
         return attributed_count
+
+    def _get_yolo_carrying(self, video_filename: str, track_id: int) -> str:
+        """
+        Check DetectedObject rows for this track for YOLO-detected carrying items.
+        COCO classes: 24=backpack, 26=handbag, 28=suitcase.
+        These are detected by YOLO in real-time during frame processing but not
+        yet wired into TrackEvent.attributes.carrying — this method closes that gap.
+        Returns the first carrying item found, or "" if none.
+        """
+        # COCO class names that YOLO detects (already stored as object_class in DB)
+        CARRYING_CLASSES = {"backpack", "handbag", "suitcase"}
+        try:
+            nearby = (
+                self.db.query(DetectedObject)
+                .filter(
+                    DetectedObject.video_filename == video_filename,
+                    DetectedObject.track_id == track_id,
+                    DetectedObject.object_class.in_(CARRYING_CLASSES),
+                )
+                .first()
+            )
+            return nearby.object_class if nearby else ""
+        except Exception:
+            return ""
+
+    def _get_yolo_hat(self, video_filename: str, track_id: int) -> str:
+        """
+        Check DetectedObject rows for YOLO-detected hat/helmet near this track.
+        COCO class 27 = 'hat' (though many YOLO models map it differently).
+        Also checks if objects_nearby stored in TrackEvent.attributes contains hat/helmet.
+        Returns hat label or "".
+        """
+        HAT_CLASSES = {"hat", "helmet", "hard hat"}
+        try:
+            nearby = (
+                self.db.query(DetectedObject)
+                .filter(
+                    DetectedObject.video_filename == video_filename,
+                    DetectedObject.track_id == track_id,
+                    DetectedObject.object_class.in_(HAT_CLASSES),
+                )
+                .first()
+            )
+            if nearby:
+                return nearby.object_class
+            # Also check objects_nearby in TrackEvent.attributes (stored by activity_detector)
+            from app.storage.models import TrackEvent as _TE
+            entry_ev = (
+                self.db.query(_TE)
+                .filter(
+                    _TE.video_filename == video_filename,
+                    _TE.track_id == track_id,
+                    _TE.event_type == "entry",
+                )
+                .first()
+            )
+            if entry_ev:
+                nearby_objs = (entry_ev.attributes or {}).get("objects_nearby", [])
+                for obj in nearby_objs:
+                    if any(h in str(obj).lower() for h in ("hat", "helmet")):
+                        return obj
+            return ""
+        except Exception:
+            return ""
 
     def _update_best_detected_object_vehicle(
         self,

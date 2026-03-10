@@ -182,7 +182,7 @@ class VideoSummarizer:
             "system": TRACK_SUMMARY_SYSTEM_PROMPT,
             "prompt": user_message,
             "stream": False,
-            "options": {"num_ctx": 8192, "num_predict": 800},
+            "options": {"num_ctx": 2048, "num_predict": 400},
         }
 
         # Retry up to 2 times on transient Ollama errors (cold start, busy)
@@ -290,7 +290,7 @@ class VideoSummarizer:
             "system": SUMMARY_SYSTEM_PROMPT,
             "prompt": user_message,
             "stream": False,
-            "options": {"num_ctx": 8192, "num_predict": 800},
+            "options": {"num_ctx": 2048, "num_predict": 400},
         }
 
         last_exc = None

@@ -189,7 +189,7 @@ class ActivityCaptioner:
                     "prompt": self._PROMPT,
                     "images": [img_b64],
                     "stream": False,
-                    "options": {"num_predict": 30, "temperature": 0.1},
+                    "options": {"num_predict": 30, "temperature": 0.1, "num_ctx": 2048},
                 },
                 timeout=(5, 60),  # (connect_timeout, read_timeout)
             )

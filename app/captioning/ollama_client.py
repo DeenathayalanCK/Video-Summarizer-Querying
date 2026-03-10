@@ -38,9 +38,9 @@ class OllamaMultimodalClient:
             "images": [image_b64],
             "stream": False,
             "options": {
-                # FIX: cap token output — prevents model writing essays
                 "num_predict": self.settings.caption_max_tokens,
                 "temperature": 0.1,
+                "num_ctx": 2048,  # KV cache: 2048 sufficient for single-frame captions
             },
         }
 

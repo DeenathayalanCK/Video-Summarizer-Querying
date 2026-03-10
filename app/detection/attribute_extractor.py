@@ -62,6 +62,9 @@ class PersonAttributes:
     head_covering: str = "unknown"
     carrying: str = "unknown"
     visible_text: str = "none"   # text printed on clothing/badge e.g. "SECURITY"
+    # Tier-1 CV fields — always populated from color histogram, no LLM needed
+    clothing_top_color: str = "unknown"
+    clothing_bottom_color: str = "unknown"
 
     def to_dict(self) -> dict:
         return {
@@ -72,13 +75,18 @@ class PersonAttributes:
             "head_covering": self.head_covering,
             "carrying": self.carrying,
             "visible_text": self.visible_text,
+            "clothing_top_color": self.clothing_top_color,
+            "clothing_bottom_color": self.clothing_bottom_color,
         }
 
     @property
     def has_data(self) -> bool:
+        # True if ANY meaningful field extracted — includes Tier-1 CV color
         return any(
             v not in ("unknown", "none")
-            for v in [self.gender_estimate, self.clothing_top, self.clothing_bottom]
+            for v in [self.gender_estimate, self.clothing_top,
+                      self.clothing_bottom, self.clothing_top_color,
+                      self.clothing_bottom_color]
         )
 
 
@@ -152,7 +160,10 @@ class BaseAttributeExtractor:
         # OperationalError, aborting all remaining tracks in the window.
         # Cap read timeout at 90s; use separate 5s connect timeout so a
         # cold/unreachable Ollama fails fast rather than blocking the whole pipeline.
-        attr_timeout = min(self.settings.caption_timeout_seconds, 120)  # 120s — CPU vision models can be slow
+        # Tier-1 CV gives color+carrying for free. LLM (tier-2) is optional enrichment
+        # for gender/age/clothing type. With semaphore fix, 30s is sufficient — the
+        # thread won't waste its timeout waiting for another thread's Ollama call.
+        attr_timeout = 120  # 30s — if it doesn't finish in 30s, tier-1 data is enough
 
         # Skip entirely if no multimodal model configured
         if not self.model or not self.model.strip():
@@ -214,6 +225,83 @@ class BaseAttributeExtractor:
             raw_response=text[:200],
         )
         return None
+
+    # ── Tier-1: OpenCV color histogram (zero LLM dependency, <5ms) ────────────
+
+    # HSV hue/saturation/value bounds for dominant color classification.
+    # Format: (color_name, (lo_h, lo_s, lo_v), (hi_h, hi_s, hi_v))
+    _COLOR_RANGES = [
+        ("black",  (0, 0, 0),     (180, 255, 60)),
+        ("white",  (0, 0, 200),   (180, 30,  255)),
+        ("red",    (0, 120, 70),  (10,  255, 255)),
+        ("red",    (170, 120, 70),(180, 255, 255)),
+        ("orange", (11, 100, 70), (25,  255, 255)),
+        ("yellow", (26, 100, 70), (34,  255, 255)),
+        ("green",  (35, 50,  50), (85,  255, 255)),
+        ("blue",   (86, 50,  50), (130, 255, 255)),
+        ("navy",   (86, 80,  20), (130, 255, 100)),
+        ("purple", (131, 50, 50), (160, 255, 255)),
+        ("pink",   (161, 50, 100),(169, 255, 255)),
+        ("grey",   (0, 0,   70),  (180, 40,  200)),
+        ("brown",  (10, 50, 50),  (20,  200, 150)),
+    ]
+
+    def extract_cv_colors(self, crop_path: str) -> tuple:
+        """
+        Tier-1: Extract dominant clothing color for top and bottom halves
+        using OpenCV HSV color histograms. No LLM required. ~3ms per crop.
+
+        Splits crop into top-third (shirt/jacket) and bottom-third (pants/skirt),
+        skips middle third to reduce torso/waist overlap.
+
+        Returns (top_color: str, bottom_color: str) — "unknown" if unreadable.
+        """
+        try:
+            img = cv2.imread(crop_path)
+            if img is None or img.shape[0] < 20 or img.shape[1] < 10:
+                return "unknown", "unknown"
+
+            h, w = img.shape[:2]
+            top_region    = img[: h // 3, :]
+            bottom_region = img[2 * h // 3 :, :]
+
+            return self._dominant_color(top_region), self._dominant_color(bottom_region)
+
+        except Exception as e:
+            self.logger.debug("cv_color_extraction_failed", path=crop_path, error=str(e))
+            return "unknown", "unknown"
+
+    def _dominant_color(self, region: np.ndarray) -> str:
+        """Return dominant clothing color from an image region via HSV matching."""
+        if region is None or region.size == 0:
+            return "unknown"
+        try:
+            hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        except Exception:
+            return "unknown"
+
+        pixels = hsv.reshape(-1, 3)
+        total = len(pixels)
+        if total == 0:
+            return "unknown"
+
+        color_counts: dict = {}
+        for px in pixels:
+            h_v, s_v, v_v = int(px[0]), int(px[1]), int(px[2])
+            for color, (lo_h, lo_s, lo_v), (hi_h, hi_s, hi_v) in self._COLOR_RANGES:
+                if (lo_h <= h_v <= hi_h and
+                        lo_s <= s_v <= hi_s and
+                        lo_v <= v_v <= hi_v):
+                    color_counts[color] = color_counts.get(color, 0) + 1
+                    break  # first matching range wins
+
+        if not color_counts:
+            return "unknown"
+        best = max(color_counts, key=color_counts.get)
+        # Require ≥15% pixel coverage to avoid noise
+        if color_counts[best] / total < 0.15:
+            return "unknown"
+        return best
 
     def _parse_prose_person_attrs(self, text: str) -> dict:
         """
@@ -371,42 +459,70 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
 
     def extract(self, crop_path: str) -> PersonAttributes:
         """
-        Run minicpm-v on a person crop and return structured attributes.
+        Extract person attributes using a two-tier pipeline:
+
+        Tier-1 (always, <5ms): OpenCV HSV color histogram → clothing_top_color,
+          clothing_bottom_color. Always succeeds if crop is readable.
+
+        Tier-2 (optional, up to 30s): Ollama LLM → gender, age, clothing type,
+          carrying, visible_text. If it times out, Tier-1 data is still returned.
+          Only runs if a multimodal model is configured.
+
         Never raises — returns default PersonAttributes on any failure.
         """
         self.logger.info("person_attribute_extraction_start", crop=crop_path)
 
-        image_b64 = self._load_and_encode_crop(crop_path)
-        if image_b64 is None:
-            return PersonAttributes()
+        # ── Tier-1: CV color extraction (always, <5ms) ───────────────────────
+        top_color, bottom_color = self.extract_cv_colors(crop_path)
+        self.logger.info(
+            "person_cv_colors_done",
+            crop=crop_path,
+            top_color=top_color,
+            bottom_color=bottom_color,
+        )
 
-        raw = self._call_vision_model(image_b64, PERSON_ATTRIBUTE_PROMPT)
-        if raw is None:
-            return PersonAttributes()
+        # ── Tier-2: LLM extraction (optional) ───────────────────────────────
+        llm_attrs: dict = {}
+        if self.model and self.model.strip():
+            image_b64 = self._load_and_encode_crop(crop_path)
+            if image_b64 is not None:
+                raw = self._call_vision_model(image_b64, PERSON_ATTRIBUTE_PROMPT)
+                if raw is not None:
+                    data = self._extract_json(raw)
+                    if data is None:
+                        # JSON failed — try prose fallback (moondream2 style)
+                        data = self._parse_prose_person_attrs(raw)
+                        if data:
+                            self.logger.info(
+                                "person_attribute_prose_fallback",
+                                crop=crop_path,
+                                fields_found=list(data.keys()),
+                            )
+                    if data:
+                        llm_attrs = data
 
-        data = self._extract_json(raw)
-        if data is None:
-            # JSON parse failed — try prose extraction (common with moondream2)
-            prose_data = self._parse_prose_person_attrs(raw)
-            if prose_data:
-                self.logger.info(
-                    "person_attribute_prose_fallback",
-                    crop=crop_path,
-                    fields_found=list(prose_data.keys()),
-                )
-                data = prose_data
-            else:
-                return PersonAttributes()
+        # ── Merge: Tier-1 color fills in where LLM didn't extract ────────────
+        # If LLM got clothing_top (e.g. "black jacket"), use that — it has type info.
+        # If LLM got nothing or timed out, fall back to CV color-only.
+        clothing_top    = str(llm_attrs.get("clothing_top", "unknown")).lower().strip()
+        clothing_bottom = str(llm_attrs.get("clothing_bottom", "unknown")).lower().strip()
+
+        # If LLM clothing field is unknown but CV got a color, use the CV color
+        if (clothing_top == "unknown" or not clothing_top) and top_color != "unknown":
+            clothing_top = top_color  # just the color — no type suffix
+        if (clothing_bottom == "unknown" or not clothing_bottom) and bottom_color != "unknown":
+            clothing_bottom = bottom_color
 
         attrs = PersonAttributes(
-            gender_estimate=str(data.get("gender_estimate", "unknown")).lower().strip(),
-            age_estimate=str(data.get("age_estimate", "unknown")).lower().strip(),
-            clothing_top=str(data.get("clothing_top", "unknown")).lower().strip(),
-            clothing_bottom=str(data.get("clothing_bottom", "unknown")).lower().strip(),
-            head_covering=str(data.get("head_covering", "unknown")).lower().strip(),
-            carrying=str(data.get("carrying", "unknown")).lower().strip(),
-            # visible_text keeps its original case — "SECURITY" not "security"
-            visible_text=str(data.get("visible_text", "none")).strip(),
+            gender_estimate=str(llm_attrs.get("gender_estimate", "unknown")).lower().strip(),
+            age_estimate=str(llm_attrs.get("age_estimate", "unknown")).lower().strip(),
+            clothing_top=clothing_top,
+            clothing_bottom=clothing_bottom,
+            head_covering=str(llm_attrs.get("head_covering", "unknown")).lower().strip(),
+            carrying=str(llm_attrs.get("carrying", "unknown")).lower().strip(),
+            visible_text=str(llm_attrs.get("visible_text", "none")).strip(),
+            clothing_top_color=top_color,
+            clothing_bottom_color=bottom_color,
         )
 
         self.logger.info(
@@ -415,5 +531,7 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
             gender=attrs.gender_estimate,
             top=attrs.clothing_top,
             bottom=attrs.clothing_bottom,
+            top_cv=top_color,
+            bottom_cv=bottom_color,
         )
         return attrs

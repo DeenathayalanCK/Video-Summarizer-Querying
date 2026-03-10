@@ -342,51 +342,98 @@ def _resolve_when(db, q: str, video_filename: Optional[str]) -> dict:
 
 
 def _resolve_identity(db, q: str, video_filename: Optional[str]) -> dict:
-    """Answer 'what colour is X / what was person wearing' from attributes."""
+    """Answer 'what colour is X / what was person wearing' from attributes.
+    
+    Bug fix: When video_filename is None (All videos), old code returned
+    tracks from all windows including old ones with attr_has_data=False,
+    showing 'appearance unknown' for tracks whose LLM timed out.
+    Now filters to prefer tracks with real attribute data.
+    Also uses Tier-1 CV color fields (clothing_top_color/bottom_color) as fallback.
+    """
     obj_class = _detect_class(q)
     events = _entry_events(db, video_filename, obj_class)
 
-    matches = [ev for ev in events if ev.attributes]
-    if not matches:
-        return {"answered": False}  # Let LLM handle if no attributes
+    if not events:
+        return {"answered": False}
+
+    # Tier priority:
+    #   rich  = LLM ran and got data (attr_has_data=True)
+    #   cv    = CV tier-1 only (attr_tier1_only=True, clothing_top_color set)
+    #   none  = no attributes at all (old window, extraction not run)
+    # When All videos is selected, only show rich+cv — never show "appearance unknown"
+    # from old windows alongside good results from a specific window.
+    rich_events = [ev for ev in events if (ev.attributes or {}).get("attr_has_data")]
+    cv_events   = [ev for ev in events if (ev.attributes or {}).get("attr_tier1_only")]
+
+    if rich_events:
+        # Best case: full LLM data available somewhere
+        matches = rich_events
+    elif cv_events:
+        # CV-only data (color histogram), still useful
+        matches = cv_events
+    else:
+        # No processed attrs at all — let LLM handle rather than show "unknown"
+        # Unless they specifically asked "is there a person" (presence, not identity)
+        matches_any = [ev for ev in events if ev.attributes]
+        if not matches_any:
+            return {"answered": False}
+        # Check if any have visible non-unknown attrs
+        has_real = [ev for ev in matches_any if any(
+            (ev.attributes.get(k) or "") not in ("unknown", "none", "")
+            for k in ("clothing_top", "clothing_bottom", "clothing_top_color",
+                      "clothing_bottom_color", "color", "gender_estimate")
+        )]
+        if not has_real:
+            return {"answered": False}
+        matches = has_real
 
     lines = []
     for ev in matches[:5]:
         attrs = ev.attributes or {}
         if ev.object_class in ("car","truck","bus","motorcycle","bicycle"):
-            color   = attrs.get("color", "unknown")
-            vtype   = attrs.get("type", "vehicle")
-            make    = attrs.get("make_estimate", "")
-            plate   = attrs.get("plate_number", "")
-            desc = f"**{color} {vtype}**"
+            color  = attrs.get("color", "unknown")
+            vtype  = attrs.get("type", "vehicle")
+            make   = attrs.get("make_estimate", "")
+            plate  = attrs.get("plate_number", "")
+            desc   = f"**{color} {vtype}**"
             if make and make != "unknown":
                 desc += f" ({make})"
             if plate and plate != "unknown":
                 desc += f", plate: {plate}"
             lines.append(
                 f"Track #{ev.track_id}: {desc} — "
-                f"seen {_fmt(ev.first_seen_second)}–{_fmt(ev.last_seen_second)} "
+                f"seen {_fmt(ev.first_seen_second)}\u2013{_fmt(ev.last_seen_second)} "
                 f"in `{ev.video_filename}`"
             )
         else:
-            gender  = attrs.get("gender_estimate", "")
-            age     = attrs.get("age_estimate", "")
-            top     = attrs.get("clothing_top", "")
-            bottom  = attrs.get("clothing_bottom", "")
-            carry   = attrs.get("carrying", "")
-            vis     = attrs.get("visible_text", "")
-            parts = [p for p in [gender, age, top, bottom]
-                     if p and p not in ("unknown","none","")]
-            if carry and carry not in ("unknown","none"):
+            gender = attrs.get("gender_estimate", "")
+            age    = attrs.get("age_estimate", "")
+            top    = attrs.get("clothing_top", "")
+            bottom = attrs.get("clothing_bottom", "")
+            # Fall back to CV color fields if LLM clothing is unknown
+            if not top or top in ("unknown", "none"):
+                top = attrs.get("clothing_top_color", "")
+            if not bottom or bottom in ("unknown", "none"):
+                bottom = attrs.get("clothing_bottom_color", "")
+            carry  = attrs.get("carrying", "")
+            vis    = attrs.get("visible_text", "")
+            parts  = [p for p in [gender, age, top, bottom]
+                      if p and p not in ("unknown", "none", "")]
+            if carry and carry not in ("unknown", "none"):
                 parts.append(f"carrying {carry}")
-            if vis and vis not in ("none","unknown"):
+            if vis and vis not in ("none", "unknown"):
                 parts.append(f'badge/text: "{vis}"')
-            desc = ", ".join(parts) if parts else "appearance unknown"
+            if not parts:
+                continue  # skip genuinely empty tracks
+            desc = ", ".join(parts)
             lines.append(
                 f"Track #{ev.track_id}: **{desc}** — "
-                f"seen {_fmt(ev.first_seen_second)}–{_fmt(ev.last_seen_second)} "
+                f"seen {_fmt(ev.first_seen_second)}\u2013{_fmt(ev.last_seen_second)} "
                 f"in `{ev.video_filename}`"
             )
+
+    if not lines:
+        return {"answered": False}
 
     return {
         "answered": True,

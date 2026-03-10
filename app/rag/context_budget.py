@@ -1,38 +1,43 @@
 """
 context_budget.py — Token-aware context trimming for Ollama.
 
-Ollama's default num_ctx is 4096 for most models (llama3, mistral etc).
-We pass options.num_ctx=8192 in every request to use the model's full window.
-Even so, we must stay within budget — raw events alone can exceed 8k.
+CPU-only deployment: num_ctx=4096 (was 8192).
+KV cache scales linearly with num_ctx. On CPU:
+  llama3.2 @ 8192 ctx: ~1.88 GB KV cache + 2.0 GB weights = 3.9 GB
+  llama3.2 @ 4096 ctx: ~0.94 GB KV cache + 2.0 GB weights = 2.9 GB  ← 1 GB saved
+The actual surveillance QA prompt is ~600-1200 tokens — 4096 is more than enough.
+8192 was wasteful KV pre-allocation causing RAM pressure and timeouts.
 
-Budget allocation (out of 8192 total context):
-  Fixed overhead (system prompt + template + question): ~800 tokens
-  Remaining for content: 7392 tokens, allocated as:
-    Focused track context : 2000 (most relevant — always include first)
-    Memory graph          : 1000
-    Behaviour analysis    :  700
-    Timeline              :  800
-    Raw events            : remainder (capped at 2500)
+Budget allocation (out of 4096 total context):
+  Fixed overhead (system prompt + template + question): ~600 tokens
+  Remaining for content: 3496 tokens, allocated as:
+    Focused track context : 1200 (most relevant — always include first)
+    Memory graph          :  600
+    Behaviour analysis    :  400
+    Timeline              :  500
+    Raw events            : remainder (capped at 800)
 
 Rough token estimate: 1 token ~= 3.5 chars (conservative for English surveillance text)
 """
 
 _CHARS_PER_TOKEN = 3.5
 
-# Context window to request from Ollama
-OLLAMA_NUM_CTX = 8192
+# Context window to request from Ollama.
+# KV cache cost = num_ctx × 2 × n_layers × hidden_dim × 2 bytes
+# llama3.2: 28 layers, 2048 dim → 4096 ctx costs ~0.94 GB vs 8192 → ~1.88 GB
+OLLAMA_NUM_CTX = 4096
 
-# Budget per section in tokens
+# Budget per section in tokens (must sum to < OLLAMA_NUM_CTX - overhead)
 _BUDGETS = {
-    "focused":    2000,
-    "memory":     1000,
-    "behaviour":   700,
-    "timeline":    800,
-    "raw_events": 2500,
+    "focused":    1200,
+    "memory":      600,
+    "behaviour":   400,
+    "timeline":    500,
+    "raw_events": 800,
 }
 
 # Fixed overhead estimate (system prompt + template text + question)
-_FIXED_OVERHEAD_TOKENS = 900
+_FIXED_OVERHEAD_TOKENS = 600  # system prompt + template + question
 
 
 def _token_estimate(text: str) -> int:

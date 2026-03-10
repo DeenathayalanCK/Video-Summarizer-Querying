@@ -181,17 +181,30 @@ class WindowManager:
         import time
         from app.storage.database import SessionLocal
         db = SessionLocal()
+        _t0 = time.monotonic()
+        def _elapsed():
+            return round(time.monotonic() - _t0, 1)
         try:
             # Brief delay to let LiveStreamProcessor flush final frame writes
             time.sleep(3)
             self.logger.info("window_postprocess_start", key=key)
-            self._set_step(key, "🧠 Attributes", db)
 
             # ── STEP 1: Attribute extraction ─────────────────────────────────
+            # Calls minicpm-v per track (≤90s read timeout each).
+            # With cache-hit skipping and already-attributed tracks, subsequent
+            # windows are very fast (<1s per track).  First-time attribution
+            # of a window with N new tracks takes at most N×90s.
+            # If MULTIMODAL_MODEL is not set, this step is instant.
+            self._set_step(key, "🧠 Attributes", db)
             try:
-                from app.detection.attribute_processor import AttributeProcessor
-                n_attr = AttributeProcessor(db).run(key)
-                self.logger.info("window_attrs_done", key=key, tracks=n_attr)
+                from app.core.config import get_settings as _gs_attr
+                if _gs_attr().multimodal_model:
+                    from app.detection.attribute_processor import AttributeProcessor
+                    n_attr = AttributeProcessor(db).run(key)
+                    self.logger.info("window_attrs_done", key=key, tracks=n_attr, elapsed_s=_elapsed())
+                else:
+                    self.logger.info("window_attrs_skipped",
+                                     reason="no_multimodal_model", key=key)
             except Exception as e:
                 self.logger.warning("window_attrs_failed", key=key, error=str(e))
 
@@ -199,7 +212,7 @@ class WindowManager:
             self._set_step(key, "📊 Temporal", db)
             try:
                 self._run_temporal(key, db)
-                self.logger.info("window_temporal_done", key=key)
+                self.logger.info("window_temporal_done", key=key, elapsed_s=_elapsed())
             except Exception as e:
                 self.logger.warning("window_temporal_failed", key=key, error=str(e))
 
@@ -209,7 +222,7 @@ class WindowManager:
                 from app.detection.timeline_builder import TimelineBuilder
                 from app.core.config import get_settings
                 TimelineBuilder(db).build(key, get_settings().camera_id)
-                self.logger.info("window_timeline_done", key=key)
+                self.logger.info("window_timeline_done", key=key, elapsed_s=_elapsed())
             except Exception as e:
                 self.logger.warning("window_timeline_failed", key=key, error=str(e))
 
@@ -219,16 +232,23 @@ class WindowManager:
                 from app.storage.memory_graph import MemoryGraphBuilder
                 from app.core.config import get_settings
                 MemoryGraphBuilder(db).build(key, get_settings().camera_id)
-                self.logger.info("window_memory_graph_done", key=key)
+                self.logger.info("window_memory_graph_done", key=key, elapsed_s=_elapsed())
             except Exception as e:
                 self.logger.warning("window_memory_graph_failed", key=key, error=str(e))
 
             # ── STEP 5: Activity captions (minicpm-v per track) ──────────────
+            # Skipped automatically if MULTIMODAL_MODEL not set (no stall).
+            # Hard budget of 180s enforced inside run_activity_captions_for_window.
             self._set_step(key, "🎯 Activity AI", db)
             try:
-                from app.detection.activity_detector import run_activity_captions_for_window
-                n_cap = run_activity_captions_for_window(key, db)
-                self.logger.info("window_activity_captions_done", key=key, captioned=n_cap)
+                from app.core.config import get_settings as _gs_act
+                if _gs_act().multimodal_model:
+                    from app.detection.activity_detector import run_activity_captions_for_window
+                    n_cap = run_activity_captions_for_window(key, db)
+                    self.logger.info("window_activity_captions_done", key=key, captioned=n_cap)
+                else:
+                    self.logger.info("window_activity_captions_skipped",
+                                     reason="no_multimodal_model", key=key)
             except Exception as e:
                 self.logger.warning("window_activity_captions_failed", key=key, error=str(e))
 
@@ -236,7 +256,7 @@ class WindowManager:
             self._set_step(key, "🔢 Embeddings", db)
             try:
                 self._run_reembed(key, db)
-                self.logger.info("window_reembed_done", key=key)
+                self.logger.info("window_reembed_done", key=key, elapsed_s=_elapsed())
             except Exception as e:
                 self.logger.warning("window_reembed_failed", key=key, error=str(e))
 
@@ -245,7 +265,7 @@ class WindowManager:
             try:
                 from app.rag.summarizer import VideoSummarizer
                 VideoSummarizer(db).summarize_from_tracks(key)
-                self.logger.info("window_summary_done", key=key)
+                self.logger.info("window_summary_done", key=key, elapsed_s=_elapsed())
             except Exception as e:
                 self.logger.warning("window_summary_failed", key=key, error=str(e))
 
@@ -272,7 +292,7 @@ class WindowManager:
                 self.logger.warning("window_status_counts_failed", key=key, error=str(e))
 
             self._mark_status(key, "completed")
-            self.logger.info("window_postprocess_complete", key=key)
+            self.logger.info("window_postprocess_complete", key=key, total_s=_elapsed())
 
         except Exception as e:
             self.logger.error("window_postprocess_error", key=key, error=str(e))

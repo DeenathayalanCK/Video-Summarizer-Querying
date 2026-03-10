@@ -67,6 +67,7 @@ services:
     volumes:
       - ./app:/app/app
       - live_crops:/data/live_crops
+      - face_models:/data/models
       - ./data:/app/data
       - ./static:/app/static
       - ./config:/app/config
@@ -79,3 +80,4 @@ volumes:
   postgres_data:
   ollama_data:
   live_crops:
+  face_models:

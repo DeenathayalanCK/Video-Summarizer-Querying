@@ -373,7 +373,12 @@ def get_detections(
     max_second: Optional[float] = Query(None),
     db: Session = Depends(get_db),
 ):
-    """Return all detected objects for a video with optional filters."""
+    """
+    Return all detected objects for a video with optional filters.
+    Enriches each detection with its TrackEvent attributes (gender, clothing,
+    activity_hint, objects_nearby, face data) by joining on track_id.
+    """
+    from app.storage.models import TrackEvent
     repo = EventRepository(db)
     objects = repo.get_detected_objects(
         video_filename,
@@ -382,28 +387,27 @@ def get_detections(
         min_second=min_second,
         max_second=max_second,
     )
-    def _build_attributes(o) -> dict:
-        """
-        Build an attributes dict from Phase 6B columns on DetectedObject so the
-        frontend renderAttributes() helper can display person/vehicle pills the
-        same way it does for TrackEvents.
-        """
-        attrs: dict = {"object_class": o.object_class}
-        if o.object_class == "person":
-            if o.person_gender:
-                attrs["gender_estimate"] = o.person_gender
-            if o.person_clothing_top:
-                attrs["clothing_top"] = o.person_clothing_top
-            if o.person_clothing_bottom:
-                attrs["clothing_bottom"] = o.person_clothing_bottom
-        else:
-            if o.vehicle_color:
-                attrs["color"] = o.vehicle_color
-            if o.vehicle_type:
-                attrs["type"] = o.vehicle_type
-            if o.vehicle_make:
-                attrs["make_estimate"] = o.vehicle_make
-        return attrs
+
+    # Build track_id → entry TrackEvent attributes lookup (one DB query)
+    track_ids = list({o.track_id for o in objects if o.track_id is not None})
+    track_attrs: dict = {}
+    track_crops: dict = {}
+    if track_ids:
+        entry_events = (
+            db.query(TrackEvent)
+            .filter(
+                TrackEvent.video_filename == video_filename,
+                TrackEvent.event_type == "entry",
+                TrackEvent.track_id.in_(track_ids),
+            )
+            .all()
+        )
+        for ev in entry_events:
+            if ev.attributes:
+                attrs = dict(ev.attributes)
+                attrs.setdefault("object_class", ev.object_class)
+                track_attrs[ev.track_id] = attrs
+            track_crops[ev.track_id] = ev.best_crop_path
 
     return {
         "video_filename": video_filename,
@@ -417,12 +421,14 @@ def get_detections(
                 "track_id": o.track_id,
                 "quadrant": o.frame_quadrant,
                 "crop_path": o.crop_path,
+                # Best crop from TrackEvent (higher quality than individual detection)
+                "best_crop_path": track_crops.get(o.track_id),
                 "bbox": {
                     "x1": o.bbox_x1, "y1": o.bbox_y1,
                     "x2": o.bbox_x2, "y2": o.bbox_y2,
                 },
-                # Phase 6B person / vehicle attributes — None fields are omitted
-                "attributes": _build_attributes(o),
+                # Attributes from TrackEvent (null until attribute extraction runs)
+                "attributes": track_attrs.get(o.track_id),
             }
             for o in objects
         ],
@@ -503,7 +509,6 @@ def generate_summary(
     force: bool = Query(False),
     db: Session = Depends(get_db),
 ):
-    import requests as _requests
     summarizer = VideoSummarizer(db)
     repo = EventRepository(db)
     try:
@@ -514,25 +519,13 @@ def generate_summary(
             summary = summarizer.summarize(video_filename, force=force)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except _requests.exceptions.Timeout:
-        raise HTTPException(
-            status_code=504,
-            detail=(
-                "Ollama timed out generating the summary. "
-                "The video may have too many events, or the model is under load. "
-                "Try again, or increase CAPTION_TIMEOUT_SECONDS in your .env."
-            ),
-        )
-    except _requests.exceptions.ConnectionError:
-        raise HTTPException(
-            status_code=503,
-            detail="Cannot reach Ollama. Check that the service is running and OLLAMA_HOST is correct.",
-        )
-    except _requests.exceptions.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Ollama returned an error: {e}")
     except Exception as e:
-        logger.error("summarize_unexpected_error", video=video_filename, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Summarization failed: {e}")
+        # Catches requests.exceptions.Timeout, ConnectionError, etc.
+        import requests as _req
+        if isinstance(e, (_req.exceptions.Timeout, _req.exceptions.ConnectionError)):
+            raise HTTPException(status_code=503,
+                                detail=f"Ollama unavailable or timed out: {e}")
+        raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
     return {
         "video_filename": summary.video_filename,
         "caption_count": summary.caption_count,
@@ -812,6 +805,36 @@ def get_video_timeline(
     if object_class:
         entries = [e for e in entries if e.get("object_class") == object_class
                    or e.get("object_class") == "scene"]
+
+    # Enrich entries: if person_label missing (old stored timelines),
+    # look it up from TrackEvent.attributes to keep display consistent.
+    track_ids_needing_label = [
+        e["track_id"] for e in entries
+        if e.get("track_id") is not None and not e.get("person_label")
+        and e.get("object_class") == "person"
+    ]
+    if track_ids_needing_label:
+        from app.storage.models import TrackEvent
+        label_lookup = {}
+        te_rows = (
+            db.query(TrackEvent.track_id, TrackEvent.attributes)
+            .filter(
+                TrackEvent.video_filename == video_filename,
+                TrackEvent.event_type == "entry",
+                TrackEvent.track_id.in_(track_ids_needing_label),
+            )
+            .all()
+        )
+        for row_tid, row_attrs in te_rows:
+            if row_attrs and row_attrs.get("person_label"):
+                label_lookup[row_tid] = row_attrs["person_label"]
+        if label_lookup:
+            entries = [
+                dict(e, person_label=label_lookup[e["track_id"]])
+                if e.get("track_id") in label_lookup and not e.get("person_label")
+                else e
+                for e in entries
+            ]
 
     return {
         "video_filename": video_filename,

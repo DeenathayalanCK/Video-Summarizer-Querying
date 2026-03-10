@@ -78,11 +78,14 @@ class TimelineBuilder:
             is_vehicle = obj in _VEHICLE_CLASSES
 
             # ── Entry ─────────────────────────────────────────────────────────
+            person_label = attrs.get("person_label") or f"track#{tid}"
+
             entries.append({
                 "second":       round(t_in, 1),
                 "time_label":   _fmt(t_in),
                 "event":        "enters",
                 "track_id":     tid,
+                "person_label": person_label,
                 "object_class": obj,
                 "detail":       self._entry_detail(ev, attrs),
                 "crop_path":    crop,
@@ -128,6 +131,7 @@ class TimelineBuilder:
                         "time_label":   _fmt(sec),
                         "event":        label,
                         "track_id":     tid,
+                    "person_label": person_label,
                         "object_class": obj,
                         "detail":       detail,
                         "crop_path":    crop,
@@ -151,6 +155,7 @@ class TimelineBuilder:
                     "time_label":   _fmt(mid),
                     "event":        motion_label,
                     "track_id":     tid,
+                    "person_label": person_label,
                     "object_class": obj,
                     "detail":       detail,
                     "crop_path":    crop,

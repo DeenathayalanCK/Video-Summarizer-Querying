@@ -33,7 +33,6 @@ from app.detection.attribute_extractor import (
 from app.prompts.attribute_prompt import (
     build_vehicle_rag_text,
     build_person_rag_text,
-    build_person_rag_text_live,
 )
 from app.rag.embedder import OllamaEmbedder
 
@@ -142,6 +141,23 @@ class AttributeProcessor:
                     crop=crop_path,
                 )
 
+                # ── Skip if already attempted for this crop in a previous window ─────
+                # Use "attr_attempted" sentinel written after any extraction attempt.
+                # This prevents re-running minicpm-v every window even when it timed out.
+                # A timed-out result writes sentinel but not meaningful attrs.
+                existing_attrs = entry_event.attributes or {}
+                if existing_attrs.get("attr_attempted"):
+                    self.logger.info(
+                        "attribute_processor_cache_hit",
+                        video=video_filename,
+                        track_id=track_id,
+                        object_class=object_class,
+                        has_data=existing_attrs.get("attr_has_data", False),
+                    )
+                    already_attributed.add(track_id)
+                    attributed_count += 1
+                    continue
+
                 # ── Extract attributes ─────────────────────────────────────────────
                 vehicle_attrs: Optional[VehicleAttributes] = None
                 person_attrs: Optional[PersonAttributes] = None
@@ -150,8 +166,30 @@ class AttributeProcessor:
 
                 if object_class in VEHICLE_CLASSES:
                     vehicle_attrs = self.vehicle_extractor.extract(crop_path)
+                    if not vehicle_attrs.has_data:
+                        for ev in all_events_by_track.get(track_id, []):
+                            merged = dict(ev.attributes or {})
+                            merged["attr_attempted"] = True
+                            merged["attr_has_data"] = False
+                            merged["object_class"] = object_class
+                            ev.attributes = merged
+                            from sqlalchemy.orm.attributes import flag_modified as _fm
+                            _fm(ev, "attributes")
+                        self.db.commit()
+                        already_attributed.add(track_id)
+                        self.logger.info(
+                            "attribute_processor_no_data",
+                            video=video_filename,
+                            track_id=track_id,
+                            object_class=object_class,
+                            note="model_timeout_or_all_unknown",
+                        )
+                        continue
+
                     attributes_dict = vehicle_attrs.to_dict()
                     attributes_dict["object_class"] = object_class
+                    attributes_dict["attr_attempted"] = True
+                    attributes_dict["attr_has_data"] = True
 
                     new_rag_text = build_vehicle_rag_text(
                         track_id=track_id,
@@ -169,59 +207,49 @@ class AttributeProcessor:
 
                 elif object_class in PERSON_CLASSES:
                     person_attrs = self.person_extractor.extract(crop_path)
+                    if not person_attrs.has_data:
+                        # Extraction timed out or model returned all-unknown.
+                        # Write sentinel so we don't retry on every window close,
+                        # but skip writing all-unknown attrs (useless noise).
+                        for ev in all_events_by_track.get(track_id, []):
+                            merged = dict(ev.attributes or {})
+                            merged["attr_attempted"] = True
+                            merged["attr_has_data"] = False
+                            merged["object_class"] = object_class
+                            ev.attributes = merged
+                            from sqlalchemy.orm.attributes import flag_modified as _fm
+                            _fm(ev, "attributes")
+                        self.db.commit()
+                        already_attributed.add(track_id)
+                        self.logger.info(
+                            "attribute_processor_no_data",
+                            video=video_filename,
+                            track_id=track_id,
+                            object_class=object_class,
+                            note="model_timeout_or_all_unknown",
+                        )
+                        continue
+
                     attributes_dict = person_attrs.to_dict()
                     attributes_dict["object_class"] = object_class
+                    attributes_dict["attr_attempted"] = True
+                    attributes_dict["attr_has_data"] = True
 
-                    # For live tracks, first_seen_second is Unix epoch.
-                    # Use the wall-clock entry_wall_time stored in attributes instead.
-                    _attrs_raw = entry_event.attributes or {}
-                    _is_live   = _attrs_raw.get("live", False)
-                    if _is_live and _attrs_raw.get("entry_wall_time"):
-                        import datetime as _dt
-                        try:
-                            _wall_in  = _dt.datetime.fromisoformat(_attrs_raw["entry_wall_time"])
-                            _wall_out_str = (_attrs_raw.get("exit_wall_time") or "")
-                            _wall_out = _dt.datetime.fromisoformat(_wall_out_str) if _wall_out_str else _wall_in
-                            _first_ts = _wall_in.strftime("%H:%M:%S")
-                            _last_ts  = _wall_out.strftime("%H:%M:%S")
-                            _dur_live = entry_event.duration_seconds or 0.0
-                        except Exception:
-                            _first_ts = _last_ts = "unknown"
-                            _dur_live = entry_event.duration_seconds or 0.0
-                        new_rag_text = build_person_rag_text_live(
-                            track_id=track_id,
-                            event_type="entry",
-                            first_seen_wall=_first_ts,
-                            last_seen_wall=_last_ts,
-                            duration=_dur_live,
-                            confidence=entry_event.best_confidence or 0.0,
-                            gender_estimate=person_attrs.gender_estimate,
-                            age_estimate=person_attrs.age_estimate,
-                            clothing_top=person_attrs.clothing_top,
-                            clothing_bottom=person_attrs.clothing_bottom,
-                            head_covering=person_attrs.head_covering,
-                            carrying=person_attrs.carrying,
-                            visible_text=person_attrs.visible_text,
-                            person_label=_attrs_raw.get("person_label", f"track#{track_id}"),
-                            objects_nearby=_attrs_raw.get("objects_nearby", []),
-                            activity_hint=_attrs_raw.get("activity_hint", ""),
-                        )
-                    else:
-                        new_rag_text = build_person_rag_text(
-                            track_id=track_id,
-                            event_type="entry",
-                            first_seen=entry_event.first_seen_second,
-                            last_seen=entry_event.last_seen_second,
-                            duration=entry_event.duration_seconds,
-                            confidence=entry_event.best_confidence or 0.0,
-                            gender_estimate=person_attrs.gender_estimate,
-                            age_estimate=person_attrs.age_estimate,
-                            clothing_top=person_attrs.clothing_top,
-                            clothing_bottom=person_attrs.clothing_bottom,
-                            head_covering=person_attrs.head_covering,
-                            carrying=person_attrs.carrying,
-                            visible_text=person_attrs.visible_text,
-                        )
+                    new_rag_text = build_person_rag_text(
+                        track_id=track_id,
+                        event_type="entry",
+                        first_seen=entry_event.first_seen_second,
+                        last_seen=entry_event.last_seen_second,
+                        duration=entry_event.duration_seconds,
+                        confidence=entry_event.best_confidence or 0.0,
+                        gender_estimate=person_attrs.gender_estimate,
+                        age_estimate=person_attrs.age_estimate,
+                        clothing_top=person_attrs.clothing_top,
+                        clothing_bottom=person_attrs.clothing_bottom,
+                        head_covering=person_attrs.head_covering,
+                        carrying=person_attrs.carrying,
+                        visible_text=person_attrs.visible_text,
+                    )
                 else:
                     self.logger.info(
                         "attribute_processor_unsupported_class",
@@ -285,16 +313,6 @@ class AttributeProcessor:
                     self._update_best_detected_object_person(
                         video_filename, track_id, person_attrs,
                     )
-                    # ── Sync person attributes → PersonIdentity for live tracks ──────
-                    # The frontend reads PersonIdentity.attributes for person cards and
-                    # the person detail modal.  AttributeProcessor only writes to
-                    # TrackEvent.attributes — so the live UI always showed empty badges.
-                    _ev_attrs = entry_event.attributes or {}
-                    _person_label = _ev_attrs.get("person_label")
-                    if _person_label:
-                        self._sync_person_identity_attributes(
-                            _person_label, person_attrs
-                        )
 
                 # Keep-alive: the minicpm-v extraction above can take 30-90 s.
                 # If the DB connection was idled out during that time, the flush
@@ -324,10 +342,9 @@ class AttributeProcessor:
                         ev.rag_text = ev.rag_text.rstrip(".") + ". Motion: " + ", ".join(motion_parts) + "."
                         flag_modified(ev, "rag_text")
 
-                # ── Re-embed all TrackEvents for this track ────────────────────────
-                for ev in track_events_for_this_track:
-                    self._reembed_track_event(ev)
-
+                # NOTE: Embedding is handled by window_manager._run_reembed (step 6)
+                # after ALL tracks are attributed. Embedding here would cause
+                # duplicate Ollama calls (2×N instead of 1×N). Just commit attrs.
                 self.db.commit()
                 attributed_count += 1
                 already_attributed.add(track_id)
@@ -404,44 +421,6 @@ class AttributeProcessor:
             best.person_gender = attrs.gender_estimate if attrs.gender_estimate != "unknown" else None
             best.person_clothing_top = attrs.clothing_top if attrs.clothing_top != "unknown" else None
             best.person_clothing_bottom = attrs.clothing_bottom if attrs.clothing_bottom != "unknown" else None
-
-    def _sync_person_identity_attributes(
-        self,
-        person_label: str,
-        attrs: PersonAttributes,
-    ) -> None:
-        """
-        Push the freshly-extracted PersonAttributes into PersonIdentity.attributes.
-
-        The frontend reads PersonIdentity.attributes for:
-          - Live person cards (gender/age/clothing badges)
-          - Person detail modal (attribute table)
-          - Live History table badges
-
-        This was missing from the original pipeline — the table was always empty.
-        We merge into any existing JSONB so previous keys are preserved.
-        """
-        from app.storage.live_models import PersonIdentity
-        from sqlalchemy.orm.attributes import flag_modified as _fm
-        try:
-            ident = (
-                self.db.query(PersonIdentity)
-                .filter(PersonIdentity.person_label == person_label)
-                .first()
-            )
-            if ident is None:
-                return
-            existing = dict(ident.attributes or {})
-            existing.update(attrs.to_dict())
-            ident.attributes = existing
-            _fm(ident, "attributes")
-            # No separate commit here — caller does db.commit() right after
-        except Exception as e:
-            self.logger.warning(
-                "sync_person_identity_attrs_failed",
-                person_label=person_label,
-                error=str(e),
-            )
 
     def _reembed_track_event(self, event: TrackEvent) -> None:
         """

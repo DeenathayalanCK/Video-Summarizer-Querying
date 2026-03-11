@@ -62,7 +62,48 @@ class AttributeProcessor:
         self.vehicle_extractor = VehicleAttributeExtractor()
         self.person_extractor = PersonAttributeExtractor()
 
-    def run(self, video_filename: str) -> int:
+    def _policy(self, manual: bool) -> str:
+        if manual:
+            return "manual"
+        return (self.settings.attribute_policy or "selective").strip().lower()
+
+    def _should_process_track(self, entry_event: TrackEvent, policy: str) -> bool:
+        if policy == "manual":
+            return True
+        if policy in ("off", "manual_only"):
+            return False
+        if entry_event.object_class in PERSON_CLASSES:
+            return policy in ("people_only", "selective")
+        if entry_event.object_class in VEHICLE_CLASSES:
+            return policy == "vehicles_only"
+        return False
+
+    def _llm_selected_tracks(self, entry_events: list[TrackEvent], policy: str, manual: bool) -> set[int]:
+        if not self.settings.multimodal_model or not self.settings.multimodal_model.strip():
+            return set()
+        if manual:
+            return {ev.track_id for ev in entry_events if ev.best_crop_path}
+        if policy == "people_only":
+            return {ev.track_id for ev in entry_events if ev.object_class in PERSON_CLASSES}
+        if policy == "vehicles_only":
+            return {ev.track_id for ev in entry_events if ev.object_class in VEHICLE_CLASSES}
+        if policy != "selective":
+            return set()
+
+        candidates = [
+            ev for ev in entry_events
+            if ev.object_class in PERSON_CLASSES
+            and (ev.best_crop_path or "")
+            and ev.duration_seconds >= self.settings.attribute_min_duration_seconds
+        ]
+        candidates.sort(
+            key=lambda ev: (ev.duration_seconds, ev.best_confidence or 0.0),
+            reverse=True,
+        )
+        limit = max(0, self.settings.attribute_max_tracks_per_window)
+        return {ev.track_id for ev in candidates[:limit]}
+
+    def run(self, video_filename: str, manual: bool = False) -> int:
         """
         Process all TrackEvents for a video:
           1. For each unique track_id, find the event with a best_crop_path
@@ -75,7 +116,11 @@ class AttributeProcessor:
         Returns number of tracks successfully attributed.
         Always re-runs (no cache check) — always=True per project decision.
         """
-        self.logger.info("attribute_processor_starting", video=video_filename)
+        self.logger.info("attribute_processor_starting", video=video_filename, manual=manual)
+
+        if not manual and not self.settings.enable_phase_6b:
+            self.logger.info("attribute_processor_skipped", video=video_filename, reason="phase_6b_disabled")
+            return 0
 
         # Fetch all entry-type track events (one per track_id)
         # We use entry events as the canonical track record
@@ -106,6 +151,9 @@ class AttributeProcessor:
         for ev in all_track_events:
             all_events_by_track.setdefault(ev.track_id, []).append(ev)
 
+        policy = self._policy(manual)
+        llm_track_ids = self._llm_selected_tracks(entry_events, policy, manual)
+
         attributed_count = 0
         # Track IDs already processed — skip duplicate entry events for the same track.
         # ByteTrack can re-assign the same integer ID within a window, producing
@@ -133,12 +181,25 @@ class AttributeProcessor:
                     )
                     continue
 
+                if not self._should_process_track(entry_event, policy):
+                    self.logger.info(
+                        "attribute_processor_policy_skip",
+                        video=video_filename,
+                        track_id=track_id,
+                        object_class=object_class,
+                        policy=policy,
+                    )
+                    continue
+
+                allow_llm = track_id in llm_track_ids
                 self.logger.info(
                     "attribute_processor_extracting",
                     video=video_filename,
                     track_id=track_id,
                     object_class=object_class,
                     crop=crop_path,
+                    allow_llm=allow_llm,
+                    policy=policy,
                 )
 
                 # ── Skip if already attributed with full LLM data ────────────────
@@ -172,7 +233,11 @@ class AttributeProcessor:
                 new_rag_text: str = entry_event.rag_text  # fallback = existing
 
                 if object_class in VEHICLE_CLASSES:
-                    vehicle_attrs = self.vehicle_extractor.extract(crop_path)
+                    vehicle_attrs = self.vehicle_extractor.extract(
+                        crop_path,
+                        allow_llm=allow_llm,
+                        allow_plate_ocr=manual or policy == "vehicles_only",
+                    )
                     if not vehicle_attrs.has_data:
                         for ev in all_events_by_track.get(track_id, []):
                             merged = dict(ev.attributes or {})
@@ -214,7 +279,7 @@ class AttributeProcessor:
                     )
 
                 elif object_class in PERSON_CLASSES:
-                    person_attrs = self.person_extractor.extract(crop_path)
+                    person_attrs = self.person_extractor.extract(crop_path, allow_llm=allow_llm)
 
                     # ── Wire YOLO carrying/hat from nearby-object detections ──────
                     # YOLO already detects backpack (24), handbag (26), suitcase (28)
@@ -261,7 +326,15 @@ class AttributeProcessor:
                         continue
 
                     # Mark whether we have full LLM data or just CV tier-1
-                    has_llm = person_attrs.gender_estimate not in ("unknown", "")
+                    has_llm = any(
+                        value not in ("unknown", "none", "")
+                        for value in (
+                            person_attrs.gender_estimate,
+                            person_attrs.age_estimate,
+                            person_attrs.head_covering,
+                            person_attrs.visible_text,
+                        )
+                    )
                     attributes_dict = person_attrs.to_dict()
                     attributes_dict["object_class"] = object_class
                     attributes_dict["attr_attempted"] = True

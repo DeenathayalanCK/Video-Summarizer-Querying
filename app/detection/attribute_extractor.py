@@ -376,7 +376,7 @@ class VehicleAttributeExtractor(BaseAttributeExtractor):
     Returns VehicleAttributes (all fields default to "unknown" on any failure).
     """
 
-    def extract(self, crop_path: str) -> VehicleAttributes:
+    def extract(self, crop_path: str, allow_llm: bool = True, allow_plate_ocr: bool = True) -> VehicleAttributes:
         """
         Run minicpm-v on a vehicle crop and return structured attributes.
         Never raises — returns default VehicleAttributes on any failure.
@@ -385,6 +385,9 @@ class VehicleAttributeExtractor(BaseAttributeExtractor):
 
         image_b64 = self._load_and_encode_crop(crop_path)
         if image_b64 is None:
+            return VehicleAttributes()
+
+        if not allow_llm:
             return VehicleAttributes()
 
         raw = self._call_vision_model(image_b64, VEHICLE_ATTRIBUTE_PROMPT)
@@ -403,7 +406,7 @@ class VehicleAttributeExtractor(BaseAttributeExtractor):
         )
 
         # ── Second call: OCR plate number if plate was detected ───────────────
-        if attrs.plate_visible:
+        if attrs.plate_visible and allow_plate_ocr and self.settings.enable_plate_ocr:
             plate_num = self._extract_plate_number(image_b64, crop_path)
             attrs.plate_number = plate_num
             self.logger.info(
@@ -457,7 +460,7 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
     Returns PersonAttributes (all fields default to "unknown" on any failure).
     """
 
-    def extract(self, crop_path: str) -> PersonAttributes:
+    def extract(self, crop_path: str, allow_llm: bool = True) -> PersonAttributes:
         """
         Extract person attributes using a two-tier pipeline:
 
@@ -483,7 +486,7 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
 
         # ── Tier-2: LLM extraction (optional) ───────────────────────────────
         llm_attrs: dict = {}
-        if self.model and self.model.strip():
+        if allow_llm and self.model and self.model.strip():
             image_b64 = self._load_and_encode_crop(crop_path)
             if image_b64 is not None:
                 raw = self._call_vision_model(image_b64, PERSON_ATTRIBUTE_PROMPT)

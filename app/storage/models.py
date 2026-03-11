@@ -113,6 +113,12 @@ class ProcessingStatus(Base):
     # Set to None when pipeline completes. Read by /status endpoint for UI progress.
     current_step = Column(String(50), nullable=True)
 
+    # Resumable post-processing markers.
+    attrs_completed = Column(Boolean, nullable=False, default=False)
+    activity_completed = Column(Boolean, nullable=False, default=False)
+    reembed_completed = Column(Boolean, nullable=False, default=False)
+    summary_completed = Column(Boolean, nullable=False, default=False)
+
 
 # ── Phase 6A: Detection + Tracking tables ──────────────────────────────────────
 

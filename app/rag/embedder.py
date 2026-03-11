@@ -19,6 +19,7 @@ class OllamaEmbedder:
         payload = {
             "model": self.model,
             "prompt": text,
+            "options": {"num_ctx": 2048},
         }
         last_exc = None
         for _attempt in range(3):

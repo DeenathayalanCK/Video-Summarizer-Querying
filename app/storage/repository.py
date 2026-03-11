@@ -82,6 +82,10 @@ class EventRepository:
             scenes_detected=0,
             scenes_captioned=0,
             last_error=None,
+            attrs_completed=False,
+            activity_completed=False,
+            reembed_completed=False,
+            summary_completed=False,
         )
 
     def mark_scene_detected(self, video_filename: str, second: float) -> None:
@@ -304,6 +308,10 @@ class EventRepository:
             status="pending",
             phase_6b_completed=False,
             phase_6b_tracks_attributed=None,
+            attrs_completed=False,
+            activity_completed=False,
+            reembed_completed=False,
+            summary_completed=False,
             last_error=None,
             scenes_detected=0,
             scenes_captioned=0,

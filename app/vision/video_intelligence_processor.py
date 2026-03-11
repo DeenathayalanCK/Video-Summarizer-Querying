@@ -310,34 +310,31 @@ class VideoIntelligenceProcessor:
             # We join() the worker before mark_completed() to ensure all
             # attribute data is persisted before the video is declared done.
             if not self._shutdown_requested and track_states:
-                self.logger.info("6b_worker_starting", video=video_file)
-                worker_exc = [None]
+                if self.settings.enable_phase_6b:
+                    self.logger.info("6b_worker_starting", video=video_file)
+                    worker_exc = [None]
 
-                def _run_6b():
-                    worker_db = SessionLocal()
-                    try:
-                        ap = AttributeProcessor(worker_db)
-                        n = ap.run(video_file)
-                        EventRepository(worker_db).mark_6b_completed(video_file, n)
-                        self.logger.info("6b_done", video=video_file, attributed=n)
-                    except Exception as e:
-                        worker_exc[0] = e
-                        self.logger.warning("6b_failed", video=video_file, error=str(e))
-                    finally:
-                        worker_db.close()
+                    def _run_6b():
+                        worker_db = SessionLocal()
+                        try:
+                            ap = AttributeProcessor(worker_db)
+                            n = ap.run(video_file)
+                            EventRepository(worker_db).mark_6b_completed(video_file, n)
+                            self.logger.info("6b_done", video=video_file, attributed=n)
+                        except Exception as e:
+                            worker_exc[0] = e
+                            self.logger.warning("6b_failed", video=video_file, error=str(e))
+                        finally:
+                            worker_db.close()
 
-                worker = threading.Thread(target=_run_6b, daemon=True, name="6b_worker")
-                worker.start()
+                    worker = threading.Thread(target=_run_6b, daemon=True, name="6b_worker")
+                    worker.start()
+                    worker.join(timeout=_6B_TIMEOUT_S)
+                    if worker.is_alive():
+                        self.logger.warning("6b_worker_timed_out", video=video_file)
+                else:
+                    self.logger.info("6b_skipped", video=video_file, reason="phase_6b_disabled")
 
-                # Summary runs in main thread while 6B runs in background
-                self.logger.info("summary_starting", video=video_file)
-                try:
-                    VideoSummarizer(db).summarize_from_tracks(video_file)
-                    self.logger.info("summary_done", video=video_file)
-                except Exception as e:
-                    self.logger.warning("summary_failed", video=video_file, error=str(e))
-
-                # Build timeline graph + scene understanding
                 self.logger.info("timeline_build_starting", video=video_file)
                 try:
                     TimelineBuilder(db).build(video_file, self.settings.camera_id)
@@ -345,7 +342,6 @@ class VideoIntelligenceProcessor:
                 except Exception as e:
                     self.logger.warning("timeline_build_failed", video=video_file, error=str(e))
 
-                # Build semantic memory graph (Layer 1 QA context)
                 self.logger.info("memory_graph_starting", video=video_file)
                 try:
                     MemoryGraphBuilder(db).build(video_file, self.settings.camera_id)
@@ -353,11 +349,12 @@ class VideoIntelligenceProcessor:
                 except Exception as e:
                     self.logger.warning("memory_graph_failed", video=video_file, error=str(e))
 
-                # Wait for 6B before completing
-                worker.join(timeout=_6B_TIMEOUT_S)
-                if worker.is_alive():
-                    self.logger.warning("6b_worker_timed_out", video=video_file)
-
+                self.logger.info("summary_starting", video=video_file)
+                try:
+                    VideoSummarizer(db).summarize_from_tracks(video_file, force=True)
+                    self.logger.info("summary_done", video=video_file)
+                except Exception as e:
+                    self.logger.warning("summary_failed", video=video_file, error=str(e))
             else:
                 # No tracks — just generate summary
                 if not self._shutdown_requested:

@@ -18,6 +18,11 @@ async def lifespan(app: FastAPI):
     logger.info("api_starting")
     from app.core.config import get_settings
     settings = get_settings()
+    try:
+        from app.storage.database import init_db
+        init_db()
+    except Exception as e:
+        logger.warning("db_init_failed", error=str(e))
     # Create live stream tables if they don't exist
     try:
         from app.storage.database import engine

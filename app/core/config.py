@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # Text model — for Q&A and summarization
     text_model: str = Field(..., alias="TEXT_MODEL")
 
+    # Dedicated summary model: keep separate from QA so it can be tuned safely.
+    summary_model: str = Field("llama3.2:latest", alias="SUMMARY_MODEL")
+    summary_num_ctx: int = Field(2048, alias="SUMMARY_NUM_CTX")
+    summary_max_tokens: int = Field(300, alias="SUMMARY_MAX_TOKENS")
+
     # Embedding model — for semantic search (768-dim)
     embed_model: str = Field(..., alias="EMBED_MODEL")
 
@@ -86,9 +91,18 @@ class Settings(BaseSettings):
 
     # ── Phase 6B: Attribute extraction control ────────────────────────────────
 
-    # Set false to skip minicpm-v crop analysis after YOLO (default: true).
+    # Set false to skip all automatic Phase 6B crop analysis after YOLO.
     # 6B can always be triggered manually via POST /extract-attributes/{video}
     enable_phase_6b: bool = Field(True, alias="ENABLE_PHASE_6B")
+    attribute_policy: str = Field("selective", alias="ATTRIBUTE_POLICY")
+    enable_activity_captions: bool = Field(False, alias="ENABLE_ACTIVITY_CAPTIONS")
+    enable_plate_ocr: bool = Field(False, alias="ENABLE_PLATE_OCR")
+    attribute_min_duration_seconds: float = Field(8.0, alias="ATTRIBUTE_MIN_DURATION_SECONDS")
+    attribute_max_tracks_per_window: int = Field(4, alias="ATTRIBUTE_MAX_TRACKS_PER_WINDOW")
+
+    # Ollama workload lanes.
+    ask_ollama_concurrency: int = Field(1, alias="ASK_OLLAMA_CONCURRENCY")
+    pipeline_ollama_concurrency: int = Field(1, alias="PIPELINE_OLLAMA_CONCURRENCY")
 
     # ── Paths ─────────────────────────────────────────────────────────────────
 

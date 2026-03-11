@@ -68,6 +68,10 @@ class ProcessingStatusResponse(BaseModel):
     started_at: Optional[str]
     completed_at: Optional[str]
     updated_at: Optional[str]
+    attrs_completed: bool = False
+    activity_completed: bool = False
+    reembed_completed: bool = False
+    summary_completed: bool = False
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -137,31 +141,19 @@ def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
             yield f"data: {_json.dumps({'done': True, 'sources': fast.get('sources', []), 'fast_path': True})}\n\n"
             return
 
-        # LLM path: signal priority then acquire semaphore.
-        # Setting _ask_pending causes the pipeline to skip its NEXT Ollama step
-        # (attrs/activity/summary) so the user ask gets Ollama access quickly.
+        # LLM path: Ask traffic uses its own Ollama lane so background window
+        # post-processing is queued independently instead of being dropped.
         from app.vision.window_manager import WindowManager
+
         wm = WindowManager.get_instance()
-        _has_priority = hasattr(wm, '_ask_pending')
-        if _has_priority:
-            wm._ask_pending.set()
-        try:
-            wm._ollama_sem.acquire(blocking=True)
-            if _has_priority:
-                wm._ask_pending.clear()
-            try:
-                    yield from engine.stream_ask(
+        with wm.ask_ollama_ctx():
+            yield from engine.stream_ask(
                 question=body.question,
                 video_filename=body.video_filename,
                 camera_id=body.camera_id,
                 min_second=body.min_second,
                 max_second=body.max_second,
             )
-            finally:
-                wm._ollama_sem.release()
-        finally:
-            if _has_priority:
-                wm._ask_pending.clear()
 
     return StreamingResponse(
         generate(),
@@ -616,6 +608,10 @@ def _status_to_response(s) -> dict:
         "phase_6b_completed": bool(s.phase_6b_completed),
         "phase_6b_tracks_attributed": s.phase_6b_tracks_attributed,
         "current_step": getattr(s, "current_step", None),
+        "attrs_completed": bool(getattr(s, "attrs_completed", False)),
+        "activity_completed": bool(getattr(s, "activity_completed", False)),
+        "reembed_completed": bool(getattr(s, "reembed_completed", False)),
+        "summary_completed": bool(getattr(s, "summary_completed", False)),
     }
 
 
@@ -685,7 +681,7 @@ def extract_attributes(
 
     try:
         processor = AttributeProcessor(db)
-        attributed = processor.run(video_filename)
+        attributed = processor.run(video_filename, manual=True)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -55,6 +55,7 @@ class WindowManager:
         self._thread:        Optional[threading.Thread] = None
         self._stop_evt       = threading.Event()
         self._process_queue  = []  # list of window keys awaiting post-processing
+        self._queued_keys    = set()
 
         # Semaphore: only ONE postprocess thread may call Ollama at a time.
         # Two concurrent windows fight for the single CPU Ollama slot, causing
@@ -62,8 +63,12 @@ class WindowManager:
         # BEFORE calling Ollama — so each gets 100% of Ollama CPU time.
         # Steps that don't call Ollama (temporal, timeline, memory, embeddings)
         # are NOT gated — only the attribute-extraction step acquires the sem.
-        self._ollama_sem = threading.Semaphore(1)
-        self._ask_pending = threading.Event()
+        self._ask_ollama_sem = threading.Semaphore(
+            max(1, self.settings.ask_ollama_concurrency)
+        )
+        self._pipeline_ollama_sem = threading.Semaphore(
+            max(1, self.settings.pipeline_ollama_concurrency)
+        )
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -74,6 +79,7 @@ class WindowManager:
         self._thread = threading.Thread(
             target=self._rotation_loop, daemon=True, name="window_manager")
         self._thread.start()
+        self._resume_stuck_windows()
         self.logger.info("window_manager_started",
                          window=self._current_key,
                          interval_minutes=self.settings.live_window_minutes)
@@ -170,10 +176,14 @@ class WindowManager:
 
     def _queue_postprocess(self, key: str):
         """
-        Spawn a background thread to run attribute extraction → temporal → summary.
+        Spawn a background thread to run attribute extraction ??? temporal ??? summary.
         Non-blocking: stream continues while this runs.
-        The shared _ollama_sem ensures only one thread calls Ollama at a time.
+        Ask and pipeline Ollama calls run through separate bounded lanes.
         """
+        with self._lock:
+            if key in self._queued_keys:
+                return
+            self._queued_keys.add(key)
         t = threading.Thread(
             target=self._run_postprocess,
             args=(key,),
@@ -181,157 +191,257 @@ class WindowManager:
             name=f"postprocess_{key}",
         )
         t.start()
+    def _resume_stuck_windows(self):
+        """Queue windows that were left in post_processing after a restart."""
+        try:
+            from app.storage.database import SessionLocal
+            from app.storage.models import ProcessingStatus
+            db = SessionLocal()
+            try:
+                rows = db.query(ProcessingStatus).filter(
+                    ProcessingStatus.status == "post_processing"
+                ).all()
+                for row in rows:
+                    self.logger.info("window_resume_queued", key=row.video_filename)
+                    self._queue_postprocess(row.video_filename)
+            finally:
+                db.close()
+        except Exception as exc:
+            self.logger.warning("window_resume_scan_failed", error=str(exc))
 
-    def _pipeline_ollama_ctx(self, key: str, step_name: str):
-        """
-        Context manager for pipeline Ollama calls with Ask priority.
-        If a user Ask is pending AND Ollama is busy, skip this pipeline step so
-        the Ask gets Ollama access first. Step runs on the next window instead.
-        Yields True if sem acquired (proceed), False if deferred (skip).
-        """
+    def _step_completed(self, db, key: str, attr_name: str) -> bool:
+        from app.storage.models import ProcessingStatus
+        ps = db.query(ProcessingStatus).filter(ProcessingStatus.video_filename == key).first()
+        return bool(getattr(ps, attr_name, False)) if ps else False
+
+    def _mark_step_completed(self, db, key: str, attr_name: str):
+        from app.storage.models import ProcessingStatus
+        ps = db.query(ProcessingStatus).filter(ProcessingStatus.video_filename == key).first()
+        if ps:
+            setattr(ps, attr_name, True)
+            db.commit()
+
+    def ask_ollama_ctx(self):
         import contextlib
 
         @contextlib.contextmanager
         def _ctx():
-            if self._ask_pending.is_set():
-                got = self._ollama_sem.acquire(blocking=False)
-                if not got:
-                    self.logger.info(
-                        "pipeline_step_deferred_for_ask",
-                        key=key, step=step_name,
-                    )
-                    yield False
-                    return
-            else:
-                self._ollama_sem.acquire(blocking=True)
-                got = True
+            self._ask_ollama_sem.acquire(blocking=True)
             try:
-                yield got
+                yield True
             finally:
-                if got:
-                    self._ollama_sem.release()
+                self._ask_ollama_sem.release()
 
         return _ctx()
+
+    def _pipeline_ollama_ctx(self, key: str, step_name: str):
+        """Context manager for background pipeline Ollama calls."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def _ctx():
+            self._pipeline_ollama_sem.acquire(blocking=True)
+            try:
+                yield True
+            finally:
+                self._pipeline_ollama_sem.release()
+
+        return _ctx()
+
+    def _log_step_result(self, key: str, step_name: str, started_at: float, status: str, **meta):
+        elapsed_s = round(time.monotonic() - started_at, 1)
+        self.logger.info(
+            "pipeline_step_result",
+            key=key,
+            step=step_name,
+            status=status,
+            elapsed_s=elapsed_s,
+            **meta,
+        )
 
     def _run_postprocess(self, key: str):
         """
         Sequential post-processing for a closed window.
-        Pipeline: attributes → temporal → timeline → memory → activity → reembed → summary
+        Pipeline: attributes -> temporal -> timeline -> memory -> activity -> reembed -> summary
         Each step updates ProcessingStatus.current_step so the UI can show live progress.
         """
         import time
         from app.storage.database import SessionLocal
+
         db = SessionLocal()
         _t0 = time.monotonic()
+
         def _elapsed():
             return round(time.monotonic() - _t0, 1)
+
+        def _step_failure(step_name: str, started_at: float, exc: Exception):
+            self._log_step_result(
+                key,
+                step_name,
+                started_at,
+                "failed",
+                total_s=_elapsed(),
+                error=str(exc),
+                error_type=exc.__class__.__name__,
+                timeout=bool(isinstance(exc, TimeoutError)),
+            )
+
         try:
-            # Brief delay to let LiveStreamProcessor flush final frame writes
             time.sleep(3)
             self.logger.info("window_postprocess_start", key=key)
 
-            # ── STEP 1: Attribute extraction ─────────────────────────────────
-            # Calls Ollama vision model per track.
-            # Semaphore ensures only ONE window's postprocess thread calls Ollama
-            # at a time — prevents thread contention that caused all-timeout failures.
-            self._set_step(key, "🧠 Attributes", db)
-            try:
-                from app.core.config import get_settings as _gs_attr
-                if _gs_attr().multimodal_model:
-                    self.logger.info("window_attrs_waiting_sem", key=key)
-                    with self._pipeline_ollama_ctx(key, "attrs") as _sem_ok:
-                        if not _sem_ok:
-                            return
-                        self.logger.info("window_attrs_sem_acquired", key=key)
-                        from app.detection.attribute_processor import AttributeProcessor
-                        n_attr = AttributeProcessor(db).run(key)
-                    self.logger.info("window_attrs_done", key=key, tracks=n_attr, elapsed_s=_elapsed())
-                else:
-                    self.logger.info("window_attrs_skipped",
-                                     reason="no_multimodal_model", key=key)
-            except Exception as e:
-                self.logger.warning("window_attrs_failed", key=key, error=str(e))
+            if not self._step_completed(db, key, "attrs_completed"):
+                self._set_step(key, "Attributes", db)
+                step_started = time.monotonic()
+                try:
+                    from app.core.config import get_settings as _gs_attr
 
-            # ── STEP 2: Temporal analysis (with MotionSample reconstruction) ─
-            self._set_step(key, "📊 Temporal", db)
+                    settings = _gs_attr()
+                    if settings.enable_phase_6b and settings.attribute_policy not in ("off", "manual_only"):
+                        self.logger.info("window_attrs_waiting_sem", key=key)
+                        with self._pipeline_ollama_ctx(key, "attrs"):
+                            self.logger.info("window_attrs_sem_acquired", key=key)
+                            from app.detection.attribute_processor import AttributeProcessor
+
+                            n_attr = AttributeProcessor(db).run(key)
+                        self._mark_step_completed(db, key, "attrs_completed")
+                        self._log_step_result(
+                            key,
+                            "attrs",
+                            step_started,
+                            "completed",
+                            total_s=_elapsed(),
+                            tracks=n_attr,
+                        )
+                    else:
+                        self._mark_step_completed(db, key, "attrs_completed")
+                        self._log_step_result(
+                            key,
+                            "attrs",
+                            step_started,
+                            "skipped",
+                            total_s=_elapsed(),
+                            reason="policy_or_phase_disabled",
+                        )
+                except Exception as exc:
+                    _step_failure("attrs", step_started, exc)
+                    self.logger.warning("window_attrs_failed", key=key, error=str(exc))
+
+            self._set_step(key, "Temporal", db)
+            step_started = time.monotonic()
             try:
                 self._run_temporal(key, db)
-                self.logger.info("window_temporal_done", key=key, elapsed_s=_elapsed())
-            except Exception as e:
-                self.logger.warning("window_temporal_failed", key=key, error=str(e))
+                self._log_step_result(key, "temporal", step_started, "completed", total_s=_elapsed())
+            except Exception as exc:
+                _step_failure("temporal", step_started, exc)
+                self.logger.warning("window_temporal_failed", key=key, error=str(exc))
 
-            # ── STEP 3: Timeline builder ─────────────────────────────────────
-            self._set_step(key, "📅 Timeline", db)
+            self._set_step(key, "Timeline", db)
+            step_started = time.monotonic()
             try:
+                from app.core.config import get_settings
                 from app.detection.timeline_builder import TimelineBuilder
-                from app.core.config import get_settings
+
                 TimelineBuilder(db).build(key, get_settings().camera_id)
-                self.logger.info("window_timeline_done", key=key, elapsed_s=_elapsed())
-            except Exception as e:
-                self.logger.warning("window_timeline_failed", key=key, error=str(e))
+                self._log_step_result(key, "timeline", step_started, "completed", total_s=_elapsed())
+            except Exception as exc:
+                _step_failure("timeline", step_started, exc)
+                self.logger.warning("window_timeline_failed", key=key, error=str(exc))
 
-            # ── STEP 4: Memory graph ─────────────────────────────────────────
-            self._set_step(key, "🕸 Memory", db)
+            self._set_step(key, "Memory", db)
+            step_started = time.monotonic()
             try:
-                from app.storage.memory_graph import MemoryGraphBuilder
                 from app.core.config import get_settings
+                from app.storage.memory_graph import MemoryGraphBuilder
+
                 MemoryGraphBuilder(db).build(key, get_settings().camera_id)
-                self.logger.info("window_memory_graph_done", key=key, elapsed_s=_elapsed())
-            except Exception as e:
-                self.logger.warning("window_memory_graph_failed", key=key, error=str(e))
+                self._log_step_result(key, "memory", step_started, "completed", total_s=_elapsed())
+            except Exception as exc:
+                _step_failure("memory", step_started, exc)
+                self.logger.warning("window_memory_graph_failed", key=key, error=str(exc))
 
-            # ── STEP 5: Activity captions (minicpm-v per track) ──────────────
-            # Also gated by semaphore — calls Ollama vision model same as Step 1.
-            # Without gating, Step 5 of window N runs simultaneously with Step 7
-            # (summary) of window N-1, causing both to timeout from RAM pressure.
-            self._set_step(key, "🎯 Activity AI", db)
-            try:
-                from app.core.config import get_settings as _gs_act
-                if _gs_act().multimodal_model:
-                    self.logger.info("window_activity_waiting_sem", key=key)
-                    with self._pipeline_ollama_ctx(key, "activity") as _sem_ok:
-                        if not _sem_ok:
-                            return
-                        self.logger.info("window_activity_sem_acquired", key=key)
-                        from app.detection.activity_detector import run_activity_captions_for_window
-                        n_cap = run_activity_captions_for_window(key, db)
-                    self.logger.info("window_activity_captions_done", key=key, captioned=n_cap)
-                else:
-                    self.logger.info("window_activity_captions_skipped",
-                                     reason="no_multimodal_model", key=key)
-            except Exception as e:
-                self.logger.warning("window_activity_captions_failed", key=key, error=str(e))
+            if not self._step_completed(db, key, "activity_completed"):
+                self._set_step(key, "Activity AI", db)
+                step_started = time.monotonic()
+                try:
+                    from app.core.config import get_settings as _gs_act
 
-            # ── STEP 6: Re-embed updated rag_text ───────────────────────────
-            self._set_step(key, "🔢 Embeddings", db)
-            try:
-                self._run_reembed(key, db)
-                self.logger.info("window_reembed_done", key=key, elapsed_s=_elapsed())
-            except Exception as e:
-                self.logger.warning("window_reembed_failed", key=key, error=str(e))
+                    settings = _gs_act()
+                    if settings.enable_activity_captions and settings.multimodal_model:
+                        self.logger.info("window_activity_waiting_sem", key=key)
+                        with self._pipeline_ollama_ctx(key, "activity"):
+                            self.logger.info("window_activity_sem_acquired", key=key)
+                            from app.detection.activity_detector import run_activity_captions_for_window
 
-            # ── STEP 7: Summary ──────────────────────────────────────────────
-            # Gated by semaphore: llama3.2 summary must NOT overlap with moondream
-            # attribute extraction from a concurrent window's Step 1 or Step 5.
-            # Without gating: llama3.2 (2.0GB) + moondream (1.8GB) + both KV caches
-            # saturate RAM → OS pages both out → summary times out at 300s every time.
-            # With gating: llama3.2 gets full CPU alone → completes in ~60-90s.
-            self._set_step(key, "📝 Summary", db)
-            try:
-                self.logger.info("window_summary_waiting_sem", key=key)
-                with self._pipeline_ollama_ctx(key, "summary") as _sem_ok:
-                    if not _sem_ok:
-                        raise Exception("deferred_for_ask")
-                    self.logger.info("window_summary_sem_acquired", key=key)
-                    from app.rag.summarizer import VideoSummarizer
-                    VideoSummarizer(db).summarize_from_tracks(key)
-                self.logger.info("window_summary_done", key=key, elapsed_s=_elapsed())
-            except Exception as e:
-                self.logger.warning("window_summary_failed", key=key, error=str(e))
+                            n_cap = run_activity_captions_for_window(key, db)
+                        self._mark_step_completed(db, key, "activity_completed")
+                        self._log_step_result(
+                            key,
+                            "activity",
+                            step_started,
+                            "completed",
+                            total_s=_elapsed(),
+                            captioned=n_cap,
+                        )
+                    else:
+                        self._mark_step_completed(db, key, "activity_completed")
+                        self._log_step_result(
+                            key,
+                            "activity",
+                            step_started,
+                            "skipped",
+                            total_s=_elapsed(),
+                            reason="disabled",
+                        )
+                except Exception as exc:
+                    _step_failure("activity", step_started, exc)
+                    self.logger.warning("window_activity_captions_failed", key=key, error=str(exc))
 
-            # ── Final: write counts to ProcessingStatus ──────────────────────
+            if not self._step_completed(db, key, "reembed_completed"):
+                self._set_step(key, "Embeddings", db)
+                step_started = time.monotonic()
+                try:
+                    count = self._run_reembed(key, db)
+                    self._mark_step_completed(db, key, "reembed_completed")
+                    self._log_step_result(
+                        key,
+                        "reembed",
+                        step_started,
+                        "completed",
+                        total_s=_elapsed(),
+                        embeddings=count,
+                    )
+                except Exception as exc:
+                    _step_failure("reembed", step_started, exc)
+                    self.logger.warning("window_reembed_failed", key=key, error=str(exc))
+
+            if not self._step_completed(db, key, "summary_completed"):
+                self._set_step(key, "Summary", db)
+                step_started = time.monotonic()
+                try:
+                    self.logger.info("window_summary_waiting_sem", key=key)
+                    with self._pipeline_ollama_ctx(key, "summary"):
+                        self.logger.info("window_summary_sem_acquired", key=key)
+                        from app.rag.summarizer import VideoSummarizer
+
+                        summary = VideoSummarizer(db).summarize_from_tracks(key, force=True)
+                    self._mark_step_completed(db, key, "summary_completed")
+                    self._log_step_result(
+                        key,
+                        "summary",
+                        step_started,
+                        "completed",
+                        total_s=_elapsed(),
+                        summary_chars=len(summary.summary_text or ""),
+                        summary_model=summary.model_name,
+                    )
+                except Exception as exc:
+                    _step_failure("summary", step_started, exc)
+                    self.logger.warning("window_summary_failed", key=key, error=str(exc))
+
             try:
-                from app.storage.models import TrackEvent, DetectedObject, ProcessingStatus
+                from app.storage.models import DetectedObject, ProcessingStatus, TrackEvent
+
                 n_tracks = db.query(TrackEvent).filter(
                     TrackEvent.video_filename == key,
                     TrackEvent.event_type == "entry",
@@ -342,22 +452,30 @@ class WindowManager:
                 ps = db.query(ProcessingStatus).filter(
                     ProcessingStatus.video_filename == key).first()
                 if ps:
-                    ps.scenes_detected   = n_tracks
-                    ps.scenes_captioned  = n_dets
-                    ps.phase_6b_completed = True
-                    ps.phase_6b_tracks_attributed = n_tracks
-                    ps.current_step = None   # clear step label
+                    ps.scenes_detected = n_tracks
+                    ps.scenes_captioned = n_dets
+                    attempted = db.query(TrackEvent).filter(
+                        TrackEvent.video_filename == key,
+                        TrackEvent.event_type == "entry",
+                        TrackEvent.attributes.isnot(None),
+                    ).all()
+                    attempted_count = sum(1 for ev in attempted if (ev.attributes or {}).get("attr_attempted"))
+                    ps.phase_6b_completed = bool(ps.attrs_completed)
+                    ps.phase_6b_tracks_attributed = attempted_count
+                    ps.current_step = None
                     db.commit()
-            except Exception as e:
-                self.logger.warning("window_status_counts_failed", key=key, error=str(e))
+            except Exception as exc:
+                self.logger.warning("window_status_counts_failed", key=key, error=str(exc))
 
             self._mark_status(key, "completed")
             self.logger.info("window_postprocess_complete", key=key, total_s=_elapsed())
 
-        except Exception as e:
-            self.logger.error("window_postprocess_error", key=key, error=str(e))
+        except Exception as exc:
+            self.logger.error("window_postprocess_error", key=key, error=str(exc))
             self._mark_status(key, "failed")
         finally:
+            with self._lock:
+                self._queued_keys.discard(key)
             db.close()
 
     def _set_step(self, key: str, label: str, db):
@@ -489,39 +607,38 @@ class WindowManager:
 
     def _run_reembed(self, key: str, db):
         """Re-embed all TrackEvent rag_text after attribute extraction rewrites it."""
-        try:
-            from app.storage.models import TrackEvent, TrackEventEmbedding
-            from app.rag.embedder import OllamaEmbedder
-            embedder = OllamaEmbedder()
-            events = db.query(TrackEvent).filter(
-                TrackEvent.video_filename == key,
-                TrackEvent.rag_text.isnot(None),
-            ).all()
-            count = 0
-            for ev in events:
-                try:
-                    vec = embedder.embed(ev.rag_text)
-                    if vec is None:
-                        continue
-                    emb = db.query(TrackEventEmbedding).filter(
-                        TrackEventEmbedding.track_event_id == ev.id).first()
-                    if emb:
-                        emb.embedding = vec
-                    else:
-                        from app.core.config import get_settings as _gs
-                        _s = _gs()
-                        db.add(TrackEventEmbedding(
-                            track_event_id=ev.id,
-                            embedding=vec,
-                            model_name=_s.embed_model,
-                        ))
-                    count += 1
-                except Exception:
-                    pass
-            db.commit()
-            self.logger.info("window_reembed_done", key=key, count=count)
-        except Exception as e:
-            self.logger.warning("window_reembed_failed", key=key, error=str(e))
+        from app.rag.embedder import OllamaEmbedder
+        from app.storage.models import TrackEvent, TrackEventEmbedding
+
+        embedder = OllamaEmbedder()
+        events = db.query(TrackEvent).filter(
+            TrackEvent.video_filename == key,
+            TrackEvent.rag_text.isnot(None),
+        ).all()
+        count = 0
+        for ev in events:
+            try:
+                vec = embedder.embed(ev.rag_text)
+                if vec is None:
+                    continue
+                emb = db.query(TrackEventEmbedding).filter(
+                    TrackEventEmbedding.track_event_id == ev.id).first()
+                if emb:
+                    emb.embedding = vec
+                else:
+                    from app.core.config import get_settings as _gs
+                    _s = _gs()
+                    db.add(TrackEventEmbedding(
+                        track_event_id=ev.id,
+                        embedding=vec,
+                        model_name=_s.embed_model,
+                    ))
+                count += 1
+            except Exception:
+                pass
+        db.commit()
+        self.logger.info("window_reembed_done", key=key, count=count)
+        return count
 
     # ── DB helpers ────────────────────────────────────────────────────────────
 

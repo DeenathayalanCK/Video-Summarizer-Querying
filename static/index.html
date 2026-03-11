@@ -2280,26 +2280,56 @@
         const el = document.getElementById("summary-results");
         el.innerHTML = spinner();
 
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        async function startAndWaitSummaryJob() {
+          const startPath = force
+            ? `/summarize/${encodeURIComponent(video)}?force=true`
+            : `/summarize/${encodeURIComponent(video)}`;
+          const started = await apiFetch(startPath, { method: "POST" });
+          const jobId = started.job_id;
+          if (!jobId) throw new Error("Summary job did not return a job_id");
+
+          for (let i = 0; i < 300; i++) {
+            const job = await apiFetch(`/summarize/jobs/${jobId}`);
+            if (job.status === "completed") {
+              if (!job.result) throw new Error("Summary job completed without result");
+              return job.result;
+            }
+            if (job.status === "failed") {
+              throw new Error(job.error || "Summary job failed");
+            }
+
+            el.innerHTML = `
+              <div class="glass rounded-xl p-5 fade-in text-sm text-gray-400">
+                <div class="flex items-center gap-2">
+                  <svg class="spinner w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                  </svg>
+                  <span>Generating summary... (${job.status})</span>
+                </div>
+              </div>
+            `;
+            await sleep(2000);
+          }
+          throw new Error("Summary job timed out while polling");
+        }
+
         try {
           let data;
-          if (force) {
-            data = await apiFetch(
-              `/summarize/${encodeURIComponent(video)}?force=true`,
-              { method: "POST" },
-            );
-          } else {
+          if (!force) {
             try {
               data = await apiFetch(`/summary/${encodeURIComponent(video)}`);
-              // normalize field name
               if (data.summary_text) data.summary = data.summary_text;
             } catch (e) {
               if (e.message.includes("No summary")) {
-                data = await apiFetch(
-                  `/summarize/${encodeURIComponent(video)}`,
-                  { method: "POST" },
-                );
-              } else throw e;
+                data = await startAndWaitSummaryJob();
+              } else {
+                throw e;
+              }
             }
+          } else {
+            data = await startAndWaitSummaryJob();
           }
 
           el.innerHTML = `

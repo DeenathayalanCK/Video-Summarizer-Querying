@@ -11,7 +11,7 @@ from app.prompts.summary_prompt import SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_TEMPL
 from app.prompts.track_summary_prompt import TRACK_SUMMARY_SYSTEM_PROMPT, TRACK_SUMMARY_USER_TEMPLATE
 from app.storage.models import Caption, TrackEvent, VideoSummary
 
-_SUMMARY_TRACK_LIMIT = 8
+_SUMMARY_TRACK_LIMIT = 6
 _SUMMARY_PROMPT_CHAR_BUDGET = 2800
 _TRACK_LINE_CHAR_LIMIT = 220
 
@@ -69,6 +69,8 @@ class VideoSummarizer:
         self.model = self.settings.summary_model
         self.num_ctx = self.settings.summary_num_ctx
         self.max_tokens = self.settings.summary_max_tokens
+        self.timeout_s = max(30, self.settings.summary_timeout_seconds)
+        self.track_limit = max(1, self.settings.summary_track_limit)
 
     def _call_generate(
         self,
@@ -108,7 +110,7 @@ class VideoSummarizer:
             response = requests.post(
                 f"{self.settings.ollama_host}/api/generate",
                 json=payload,
-                timeout=(10, self.settings.caption_timeout_seconds),
+                timeout=(10, self.timeout_s),
             )
             response.raise_for_status()
             summary_text = response.json().get("response", "").strip()
@@ -130,7 +132,7 @@ class VideoSummarizer:
                 video=video_filename,
                 prompt_kind=prompt_kind,
                 elapsed_s=elapsed_s,
-                timeout_s=self.settings.caption_timeout_seconds,
+                timeout_s=self.timeout_s,
                 error_type=exc.__class__.__name__,
                 **prompt_meta,
             )
@@ -244,7 +246,7 @@ class VideoSummarizer:
                 dwell_by_track.get(event.track_id),
             )
             projected_chars = used_chars + len(line) + 1
-            if used >= _SUMMARY_TRACK_LIMIT or projected_chars > _SUMMARY_PROMPT_CHAR_BUDGET:
+            if used >= self.track_limit or projected_chars > _SUMMARY_PROMPT_CHAR_BUDGET:
                 omitted += 1
                 continue
             lines.append(line)
@@ -442,3 +444,5 @@ class VideoSummarizer:
             except Exception as exc:
                 self.logger.error("summary_failed", video=video_filename, error=str(exc))
         return results
+
+

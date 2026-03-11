@@ -191,9 +191,16 @@ class SemanticVideoProcessor:
 
             # ── Summarize ─────────────────────────────────────────────────────
             if not self._shutdown_requested:
-                self.logger.info("generating_video_summary", video=video_file)
-                VideoSummarizer(db).summarize(video_file)
-                self.logger.info("video_summary_complete", video=video_file)
+                if self.settings.auto_summarize:
+                    self.logger.info("generating_video_summary", video=video_file)
+                    VideoSummarizer(db).summarize(video_file)
+                    self.logger.info("video_summary_complete", video=video_file)
+                else:
+                    self.logger.info(
+                        "video_summary_skipped",
+                        video=video_file,
+                        reason="AUTO_SUMMARIZE=false — trigger via POST /api/v1/summarize/{video}",
+                    )
 
                 repo.mark_completed(video_file)
                 self.logger.info("video_processing_completed", video=video_file)

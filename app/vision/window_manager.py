@@ -57,17 +57,10 @@ class WindowManager:
         self._process_queue  = []  # list of window keys awaiting post-processing
         self._queued_keys    = set()
 
-        # Semaphore: only ONE postprocess thread may call Ollama at a time.
-        # Two concurrent windows fight for the single CPU Ollama slot, causing
-        # both to timeout.  With semaphore, thread B waits for thread A to finish
-        # BEFORE calling Ollama — so each gets 100% of Ollama CPU time.
-        # Steps that don't call Ollama (temporal, timeline, memory, embeddings)
-        # are NOT gated — only the attribute-extraction step acquires the sem.
-        self._ask_ollama_sem = threading.Semaphore(
-            max(1, self.settings.ask_ollama_concurrency)
-        )
-        self._pipeline_ollama_sem = threading.Semaphore(
-            max(1, self.settings.pipeline_ollama_concurrency)
+        # Single shared semaphore across Ask + pipeline Ollama generate calls.
+        # This avoids CPU contention where concurrent generations cause long-tail timeouts.
+        self._ollama_sem = threading.Semaphore(
+            max(1, self.settings.ollama_concurrency, self.settings.ask_ollama_concurrency, self.settings.pipeline_ollama_concurrency)
         )
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -178,7 +171,7 @@ class WindowManager:
         """
         Spawn a background thread to run attribute extraction ??? temporal ??? summary.
         Non-blocking: stream continues while this runs.
-        Ask and pipeline Ollama calls run through separate bounded lanes.
+        All Ollama generate calls share one bounded lane.
         """
         with self._lock:
             if key in self._queued_keys:
@@ -221,32 +214,29 @@ class WindowManager:
             setattr(ps, attr_name, True)
             db.commit()
 
-    def ask_ollama_ctx(self):
+    def ollama_ctx(self, lane: str, key: Optional[str] = None):
         import contextlib
 
         @contextlib.contextmanager
         def _ctx():
-            self._ask_ollama_sem.acquire(blocking=True)
+            wait_start = time.monotonic()
+            self.logger.info("ollama_lane_waiting", lane=lane, key=key)
+            self._ollama_sem.acquire(blocking=True)
+            waited_s = round(time.monotonic() - wait_start, 3)
+            self.logger.info("ollama_lane_acquired", lane=lane, key=key, waited_s=waited_s)
             try:
-                yield True
+                yield {"waited_s": waited_s}
             finally:
-                self._ask_ollama_sem.release()
+                self._ollama_sem.release()
+                self.logger.info("ollama_lane_released", lane=lane, key=key)
 
         return _ctx()
+
+    def ask_ollama_ctx(self):
+        return self.ollama_ctx("ask")
 
     def _pipeline_ollama_ctx(self, key: str, step_name: str):
-        """Context manager for background pipeline Ollama calls."""
-        import contextlib
-
-        @contextlib.contextmanager
-        def _ctx():
-            self._pipeline_ollama_sem.acquire(blocking=True)
-            try:
-                yield True
-            finally:
-                self._pipeline_ollama_sem.release()
-
-        return _ctx()
+        return self.ollama_ctx(f"pipeline_{step_name}", key=key)
 
     def _log_step_result(self, key: str, step_name: str, started_at: float, status: str, **meta):
         elapsed_s = round(time.monotonic() - started_at, 1)
@@ -419,22 +409,32 @@ class WindowManager:
                 self._set_step(key, "Summary", db)
                 step_started = time.monotonic()
                 try:
-                    self.logger.info("window_summary_waiting_sem", key=key)
-                    with self._pipeline_ollama_ctx(key, "summary"):
-                        self.logger.info("window_summary_sem_acquired", key=key)
-                        from app.rag.summarizer import VideoSummarizer
+                    from app.core.config import get_settings as _gs_sum
+                    if not _gs_sum().auto_summarize:
+                        # AUTO_SUMMARIZE=false — skip now, user triggers via
+                        # POST /api/v1/summarize/{video} or the Summary tab.
+                        self._mark_step_completed(db, key, "summary_completed")
+                        self._log_step_result(
+                            key, "summary", step_started, "skipped",
+                            total_s=_elapsed(), reason="auto_summarize_disabled",
+                        )
+                    else:
+                        self.logger.info("window_summary_waiting_sem", key=key)
+                        with self._pipeline_ollama_ctx(key, "summary"):
+                            self.logger.info("window_summary_sem_acquired", key=key)
+                            from app.rag.summarizer import VideoSummarizer
 
-                        summary = VideoSummarizer(db).summarize_from_tracks(key, force=True)
-                    self._mark_step_completed(db, key, "summary_completed")
-                    self._log_step_result(
-                        key,
-                        "summary",
-                        step_started,
-                        "completed",
-                        total_s=_elapsed(),
-                        summary_chars=len(summary.summary_text or ""),
-                        summary_model=summary.model_name,
-                    )
+                            summary = VideoSummarizer(db).summarize_from_tracks(key, force=True)
+                        self._mark_step_completed(db, key, "summary_completed")
+                        self._log_step_result(
+                            key,
+                            "summary",
+                            step_started,
+                            "completed",
+                            total_s=_elapsed(),
+                            summary_chars=len(summary.summary_text or ""),
+                            summary_model=summary.model_name,
+                        )
                 except Exception as exc:
                     _step_failure("summary", step_started, exc)
                     self.logger.warning("window_summary_failed", key=key, error=str(exc))
@@ -684,3 +684,6 @@ class WindowManager:
             except Exception: pass
         finally:
             db.close()
+
+
+

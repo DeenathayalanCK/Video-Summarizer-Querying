@@ -1,24 +1,29 @@
 """
 context_budget.py — Token-aware context trimming for Ollama.
 
-CPU-only deployment: num_ctx=4096 (was 8192).
+CPU-only deployment: num_ctx=2048.
 KV cache scales linearly with num_ctx. On CPU:
-  llama3.2 @ 8192 ctx: ~1.88 GB KV cache + 2.0 GB weights = 3.9 GB
-  llama3.2 @ 4096 ctx: ~0.94 GB KV cache + 2.0 GB weights = 2.9 GB  ← 1 GB saved
-The actual surveillance QA prompt is ~600-1200 tokens — 4096 is more than enough.
-8192 was wasteful KV pre-allocation causing RAM pressure and timeouts.
+  llama3.2 @ 4096 ctx: ~0.45 GB KV cache + 1.87 GB weights = 2.32 GB
+  llama3.2 @ 2048 ctx: ~0.22 GB KV cache + 1.87 GB weights = 2.09 GB  ← saves 230MB
+Two Ollama lanes (ask + pipeline) at 2048 each = 4.18 GB total — safe on 24 GB.
 
-Budget allocation (out of 4096 total context):
-  Fixed overhead (system prompt + template + question): ~600 tokens
-  Remaining for content: 3496 tokens, allocated as:
-    Focused track context : 1200 (most relevant — always include first)
-    Memory graph          :  600
-    Behaviour analysis    :  400
-    Timeline              :  500
-    Raw events            : remainder (capped at 800)
+Budget allocation (out of 2048 total context):
+  Fixed overhead (MEASURED: system_prompt=781t + user_template=153t + margin): ~950 tokens
+  Remaining for content: 1098 tokens, allocated as:
+    Focused track context : 400 (most relevant — always include first)
+    Video summaries       : 150
+    Memory graph          : 150
+    Behaviour analysis    : 100
+    Timeline              : 150
+    Raw events            : 100
+    Safety margin         :  48
 
 Rough token estimate: 1 token ~= 3.5 chars (conservative for English surveillance text)
 """
+
+from app.core.logging import get_logger
+
+_LOG = get_logger()
 
 _CHARS_PER_TOKEN = 3.5
 
@@ -29,16 +34,16 @@ OLLAMA_NUM_CTX = 2048
 
 # Budget per section in tokens (must sum to < OLLAMA_NUM_CTX - overhead)
 _BUDGETS = {
-    "summary": 250,   # per-window narrative summaries (NEW - prevents overflow)
-    "focused": 450,
-    "memory": 200,
-    "behaviour": 150,
-    "timeline": 200,
-    "raw_events": 150,
+    "summary": 150,   # per-window narrative summaries
+    "focused": 400,
+    "memory": 150,
+    "behaviour": 100,
+    "timeline": 150,
+    "raw_events": 100,
 }
 
 # Fixed overhead estimate (system prompt + template text + question)
-_FIXED_OVERHEAD_TOKENS = 600  # system prompt + template + question
+_FIXED_OVERHEAD_TOKENS = 950  # measured: system_prompt(781t) + user_template(153t) + margin
 
 
 def _token_estimate(text: str) -> int:
@@ -52,8 +57,11 @@ def trim_to_budget(text: str, max_tokens: int, label: str = "") -> str:
     """
     if not text:
         return ""
-    if _token_estimate(text) <= max_tokens:
+    estimated_tokens = _token_estimate(text)
+    if estimated_tokens <= max_tokens:
         return text
+
+    _LOG.info("qa_context_trimmed", section=label or "unknown", estimated_tokens=estimated_tokens, max_tokens=max_tokens)
 
     max_chars = int(max_tokens * _CHARS_PER_TOKEN)
     head_chars = int(max_chars * 0.6)
@@ -127,7 +135,9 @@ def build_budgeted_context(
 
     # Final safety net — if we somehow still exceed, hard-cut
     total_budget = OLLAMA_NUM_CTX - _FIXED_OVERHEAD_TOKENS
-    if _token_estimate(result) > total_budget:
+    final_tokens = _token_estimate(result)
+    if final_tokens > total_budget:
+        _LOG.info("qa_context_total_trimmed", estimated_tokens=final_tokens, max_tokens=total_budget)
         result = trim_to_budget(result, total_budget, "TOTAL_CONTEXT")
 
     return result

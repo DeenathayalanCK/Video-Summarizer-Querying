@@ -66,7 +66,19 @@ _OBJECT_CLASSES = {
 
 
 def _fmt(s: float) -> str:
-    return f"{int(s)//60}:{int(s)%60:02d}"
+    """Format a timestamp for display.
+
+    TrackEvent.first_seen_second stores Unix epoch seconds (e.g. 1773135152).
+    Displaying epoch//60 as minutes produces nonsense like '29552252:32'.
+    Detect epoch values (> 1_000_000_000) and convert to wall-clock HH:MM:SS.
+    Legacy offset-seconds data (< 86400) is formatted as M:SS.
+    """
+    import datetime as _dt
+    s = float(s)
+    if s > 1_000_000_000:  # Unix epoch timestamp
+        return _dt.datetime.fromtimestamp(s, tz=_dt.timezone.utc).strftime("%H:%M:%S")
+    si = int(s)
+    return f"{si//60}:{si%60:02d}"
 
 
 def _match(patterns: list, text: str) -> bool:
@@ -222,8 +234,28 @@ def _resolve_count(db, q: str, video_filename: Optional[str]) -> dict:
 
 
 def _resolve_presence(db, q: str, video_filename: Optional[str]) -> dict:
-    """Answer 'was there a X / did anyone X' quickly."""
+    """Answer 'was there a X / did anyone X' quickly.
+
+    Open-ended questions like 'was there anything suspicious?' must NOT be
+    answered here — they require LLM reasoning. Only answer simple yes/no
+    presence checks for a specific object class or a specific video.
+    """
+    # Bail out on open-ended / vague queries that need LLM reasoning
+    _open_ended = [
+        r"\bsuspicious\b", r"\banything\b", r"\bsomething\b", r"\bunusual\b",
+        r"\bwrong\b", r"\bnothing\b", r"\beverything\b",
+        r"\bany.{0,5}(issue|problem|concern)\b",
+    ]
+    if any(re.search(p, q, re.I) for p in _open_ended):
+        return {"answered": False}
+
     obj_class = _detect_class(q)
+
+    # Without a specific class AND no specific video, counting every track in
+    # the DB is meaningless — fall through to LLM instead.
+    if not obj_class and not video_filename:
+        return {"answered": False}
+
     events = _entry_events(db, video_filename, obj_class)
 
     if not events:

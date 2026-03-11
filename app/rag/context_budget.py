@@ -25,15 +25,16 @@ _CHARS_PER_TOKEN = 3.5
 # Context window to request from Ollama.
 # KV cache cost = num_ctx × 2 × n_layers × hidden_dim × 2 bytes
 # llama3.2: 28 layers, 2048 dim → 4096 ctx costs ~0.94 GB vs 8192 → ~1.88 GB
-OLLAMA_NUM_CTX = 4096
+OLLAMA_NUM_CTX = 2048
 
 # Budget per section in tokens (must sum to < OLLAMA_NUM_CTX - overhead)
 _BUDGETS = {
-    "focused":    1200,
-    "memory":      600,
-    "behaviour":   400,
-    "timeline":    500,
-    "raw_events": 800,
+    "summary": 250,   # per-window narrative summaries (NEW - prevents overflow)
+    "focused": 450,
+    "memory": 200,
+    "behaviour": 150,
+    "timeline": 200,
+    "raw_events": 150,
 }
 
 # Fixed overhead estimate (system prompt + template text + question)
@@ -86,6 +87,7 @@ def trim_to_budget(text: str, max_tokens: int, label: str = "") -> str:
 
 def build_budgeted_context(
     focused: str = "",
+    summary: str = "",
     memory: str = "",
     behaviour: str = "",
     timeline: str = "",
@@ -100,6 +102,9 @@ def build_budgeted_context(
 
     if focused:
         trimmed = trim_to_budget(focused, _BUDGETS["focused"], "focused_track_context")
+        sections.append(trimmed)
+    if summary:
+        trimmed = trim_to_budget(summary, _BUDGETS["summary"], "video_summary")
         sections.append(trimmed)
 
     if memory:

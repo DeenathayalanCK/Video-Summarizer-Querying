@@ -63,6 +63,7 @@ class WindowManager:
         # Steps that don't call Ollama (temporal, timeline, memory, embeddings)
         # are NOT gated — only the attribute-extraction step acquires the sem.
         self._ollama_sem = threading.Semaphore(1)
+        self._ask_pending = threading.Event()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -181,6 +182,37 @@ class WindowManager:
         )
         t.start()
 
+    def _pipeline_ollama_ctx(self, key: str, step_name: str):
+        """
+        Context manager for pipeline Ollama calls with Ask priority.
+        If a user Ask is pending AND Ollama is busy, skip this pipeline step so
+        the Ask gets Ollama access first. Step runs on the next window instead.
+        Yields True if sem acquired (proceed), False if deferred (skip).
+        """
+        import contextlib
+
+        @contextlib.contextmanager
+        def _ctx():
+            if self._ask_pending.is_set():
+                got = self._ollama_sem.acquire(blocking=False)
+                if not got:
+                    self.logger.info(
+                        "pipeline_step_deferred_for_ask",
+                        key=key, step=step_name,
+                    )
+                    yield False
+                    return
+            else:
+                self._ollama_sem.acquire(blocking=True)
+                got = True
+            try:
+                yield got
+            finally:
+                if got:
+                    self._ollama_sem.release()
+
+        return _ctx()
+
     def _run_postprocess(self, key: str):
         """
         Sequential post-processing for a closed window.
@@ -207,7 +239,9 @@ class WindowManager:
                 from app.core.config import get_settings as _gs_attr
                 if _gs_attr().multimodal_model:
                     self.logger.info("window_attrs_waiting_sem", key=key)
-                    with self._ollama_sem:
+                    with self._pipeline_ollama_ctx(key, "attrs") as _sem_ok:
+                        if not _sem_ok:
+                            return
                         self.logger.info("window_attrs_sem_acquired", key=key)
                         from app.detection.attribute_processor import AttributeProcessor
                         n_attr = AttributeProcessor(db).run(key)
@@ -255,7 +289,9 @@ class WindowManager:
                 from app.core.config import get_settings as _gs_act
                 if _gs_act().multimodal_model:
                     self.logger.info("window_activity_waiting_sem", key=key)
-                    with self._ollama_sem:
+                    with self._pipeline_ollama_ctx(key, "activity") as _sem_ok:
+                        if not _sem_ok:
+                            return
                         self.logger.info("window_activity_sem_acquired", key=key)
                         from app.detection.activity_detector import run_activity_captions_for_window
                         n_cap = run_activity_captions_for_window(key, db)
@@ -275,10 +311,20 @@ class WindowManager:
                 self.logger.warning("window_reembed_failed", key=key, error=str(e))
 
             # ── STEP 7: Summary ──────────────────────────────────────────────
+            # Gated by semaphore: llama3.2 summary must NOT overlap with moondream
+            # attribute extraction from a concurrent window's Step 1 or Step 5.
+            # Without gating: llama3.2 (2.0GB) + moondream (1.8GB) + both KV caches
+            # saturate RAM → OS pages both out → summary times out at 300s every time.
+            # With gating: llama3.2 gets full CPU alone → completes in ~60-90s.
             self._set_step(key, "📝 Summary", db)
             try:
-                from app.rag.summarizer import VideoSummarizer
-                VideoSummarizer(db).summarize_from_tracks(key)
+                self.logger.info("window_summary_waiting_sem", key=key)
+                with self._pipeline_ollama_ctx(key, "summary") as _sem_ok:
+                    if not _sem_ok:
+                        raise Exception("deferred_for_ask")
+                    self.logger.info("window_summary_sem_acquired", key=key)
+                    from app.rag.summarizer import VideoSummarizer
+                    VideoSummarizer(db).summarize_from_tracks(key)
                 self.logger.info("window_summary_done", key=key, elapsed_s=_elapsed())
             except Exception as e:
                 self.logger.warning("window_summary_failed", key=key, error=str(e))

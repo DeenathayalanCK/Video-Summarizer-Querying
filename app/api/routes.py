@@ -119,17 +119,49 @@ def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
     Each event is: data: {"token": "..."} or data: {"done": true, "sources": [...]}
     Fast-path queries (plate, count, presence, behaviour) return immediately
     without calling the LLM at all.
+
+    The Ollama semaphore from WindowManager is acquired for the LLM portion only.
+    Fast-path answers bypass it entirely (no Ollama call).
+    This prevents QA (llama3.2 @ 4096 KV) overlapping with postprocessing
+    (summary/attributes @ 2048 KV), which would saturate CPU RAM and cause timeouts.
     """
     engine = QAEngine(db)
 
     def generate():
-        yield from engine.stream_ask(
-            question=body.question,
-            video_filename=body.video_filename,
-            camera_id=body.camera_id,
-            min_second=body.min_second,
-            max_second=body.max_second,
-        )
+        # Fast-path: no Ollama call needed — stream immediately without sem
+        from app.rag.fast_path import try_fast_path
+        import json as _json
+        fast = try_fast_path(db, body.question, body.video_filename)
+        if fast.get("answered"):
+            yield f"data: {_json.dumps({'token': fast['answer']})}\n\n"
+            yield f"data: {_json.dumps({'done': True, 'sources': fast.get('sources', []), 'fast_path': True})}\n\n"
+            return
+
+        # LLM path: signal priority then acquire semaphore.
+        # Setting _ask_pending causes the pipeline to skip its NEXT Ollama step
+        # (attrs/activity/summary) so the user ask gets Ollama access quickly.
+        from app.vision.window_manager import WindowManager
+        wm = WindowManager.get_instance()
+        _has_priority = hasattr(wm, '_ask_pending')
+        if _has_priority:
+            wm._ask_pending.set()
+        try:
+            wm._ollama_sem.acquire(blocking=True)
+            if _has_priority:
+                wm._ask_pending.clear()
+            try:
+                    yield from engine.stream_ask(
+                question=body.question,
+                video_filename=body.video_filename,
+                camera_id=body.camera_id,
+                min_second=body.min_second,
+                max_second=body.max_second,
+            )
+            finally:
+                wm._ollama_sem.release()
+        finally:
+            if _has_priority:
+                wm._ask_pending.clear()
 
     return StreamingResponse(
         generate(),

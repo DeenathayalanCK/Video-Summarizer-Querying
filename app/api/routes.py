@@ -3,7 +3,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from typing import Optional
+from datetime import datetime, timezone
 import os
+import threading
+import time
+import uuid
+import requests
 
 from app.storage.database import SessionLocal
 from app.storage.models import Caption, DetectedObject, TrackEvent
@@ -17,7 +22,98 @@ from app.core.logging import get_logger
 
 router = APIRouter()
 logger = get_logger()
-
+_summary_jobs_lock = threading.Lock()
+_summary_jobs: dict[str, dict] = {}
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+def _summary_job_set(job_id: str, **fields):
+    with _summary_jobs_lock:
+        job = _summary_jobs.get(job_id)
+        if not job:
+            return
+        job.update(fields)
+        job["updated_at"] = _utc_now_iso()
+def _run_summary_job(job_id: str, video_filename: str, force: bool):
+    from app.vision.window_manager import WindowManager
+    db = SessionLocal()
+    started = time.monotonic()
+    _summary_job_set(job_id, status="running", started_at=_utc_now_iso())
+    try:
+        repo = EventRepository(db)
+        summarizer = VideoSummarizer(db)
+        wm = WindowManager.get_instance()
+        with wm.ollama_ctx("summary_api", key=video_filename) as lane_meta:
+            queue_wait_s = float((lane_meta or {}).get("waited_s", 0.0))
+            gen_started = time.monotonic()
+            if repo.has_detection_data(video_filename):
+                summary = summarizer.summarize_from_tracks(video_filename, force=force)
+            else:
+                summary = summarizer.summarize(video_filename, force=force)
+            generation_s = round(time.monotonic() - gen_started, 3)
+        _summary_job_set(
+            job_id,
+            status="completed",
+            finished_at=_utc_now_iso(),
+            queue_wait_s=queue_wait_s,
+            generation_s=generation_s,
+            total_s=round(time.monotonic() - started, 3),
+            result={
+                "video_filename": summary.video_filename,
+                "caption_count": summary.caption_count,
+                "duration_seconds": summary.duration_seconds,
+                "model_name": summary.model_name,
+                "summary": summary.summary_text,
+            },
+            error=None,
+            error_code=None,
+        )
+    except ValueError as exc:
+        _summary_job_set(
+            job_id,
+            status="failed",
+            finished_at=_utc_now_iso(),
+            total_s=round(time.monotonic() - started, 3),
+            error=str(exc),
+            error_code=404,
+        )
+    except TimeoutError as exc:
+        _summary_job_set(
+            job_id,
+            status="failed",
+            finished_at=_utc_now_iso(),
+            total_s=round(time.monotonic() - started, 3),
+            error=str(exc),
+            error_code=504,
+        )
+    except requests.exceptions.Timeout as exc:
+        _summary_job_set(
+            job_id,
+            status="failed",
+            finished_at=_utc_now_iso(),
+            total_s=round(time.monotonic() - started, 3),
+            error=f"Ollama timed out: {exc}",
+            error_code=504,
+        )
+    except requests.exceptions.ConnectionError as exc:
+        _summary_job_set(
+            job_id,
+            status="failed",
+            finished_at=_utc_now_iso(),
+            total_s=round(time.monotonic() - started, 3),
+            error=f"Ollama connection failed: {exc}",
+            error_code=503,
+        )
+    except Exception as exc:
+        _summary_job_set(
+            job_id,
+            status="failed",
+            finished_at=_utc_now_iso(),
+            total_s=round(time.monotonic() - started, 3),
+            error=f"Summary generation failed: {exc}",
+            error_code=500,
+        )
+    finally:
+        db.close()
 
 def get_db():
     db = SessionLocal()
@@ -101,21 +197,37 @@ def get_mode():
 
 @router.post("/ask", response_model=AskResponse)
 def ask(body: AskRequest, db: Session = Depends(get_db)):
+    from app.rag.fast_path import try_fast_path
+    from app.vision.window_manager import WindowManager
+    fast = try_fast_path(db, body.question, body.video_filename)
+    if fast.get("answered"):
+        return AskResponse(
+            question=body.question,
+            answer=fast["answer"],
+            sources=fast.get("sources", []),
+        )
     engine = QAEngine(db)
-    result = engine.ask(
-        question=body.question,
-        video_filename=body.video_filename,
-        camera_id=body.camera_id,
-        min_second=body.min_second,
-        max_second=body.max_second,
-    )
+    wm = WindowManager.get_instance()
+    try:
+        with wm.ask_ollama_ctx():
+            result = engine.ask(
+                question=body.question,
+                video_filename=body.video_filename,
+                camera_id=body.camera_id,
+                min_second=body.min_second,
+                max_second=body.max_second,
+            )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=f"Ask generation timed out: {exc}")
+    except requests.exceptions.Timeout as exc:
+        raise HTTPException(status_code=504, detail=f"Ask generation timed out: {exc}")
+    except requests.exceptions.ConnectionError as exc:
+        raise HTTPException(status_code=503, detail=f"Ollama unavailable: {exc}")
     return AskResponse(
         question=body.question,
         answer=result["answer"],
         sources=result["sources"],
     )
-
-
 @router.post("/ask-stream")
 def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
     """
@@ -126,8 +238,9 @@ def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
 
     The Ollama semaphore from WindowManager is acquired for the LLM portion only.
     Fast-path answers bypass it entirely (no Ollama call).
-    This prevents QA (llama3.2 @ 4096 KV) overlapping with postprocessing
-    (summary/attributes @ 2048 KV), which would saturate CPU RAM and cause timeouts.
+    This prevents Ask QA from competing with pipeline summary/attributes on the
+    CPU Ollama runner. Both lanes use 2048 KV cache. On 24GB RAM both can run
+    simultaneously without OOM, but serialising prevents CPU thrashing.
     """
     engine = QAEngine(db)
 
@@ -527,38 +640,50 @@ def get_summary(video_filename: str, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/summarize/{video_filename}")
+@router.post("/summarize/{video_filename}", status_code=202)
 def generate_summary(
     video_filename: str,
     force: bool = Query(False),
-    db: Session = Depends(get_db),
 ):
-    summarizer = VideoSummarizer(db)
-    repo = EventRepository(db)
-    try:
-        # Use track-based summarizer if detection data exists
-        if repo.has_detection_data(video_filename):
-            summary = summarizer.summarize_from_tracks(video_filename, force=force)
-        else:
-            summary = summarizer.summarize(video_filename, force=force)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        # Catches requests.exceptions.Timeout, ConnectionError, etc.
-        import requests as _req
-        if isinstance(e, (_req.exceptions.Timeout, _req.exceptions.ConnectionError)):
-            raise HTTPException(status_code=503,
-                                detail=f"Ollama unavailable or timed out: {e}")
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {e}")
-    return {
-        "video_filename": summary.video_filename,
-        "caption_count": summary.caption_count,
-        "duration_seconds": summary.duration_seconds,
-        "model_name": summary.model_name,
-        "summary": summary.summary_text,
+    job_id = uuid.uuid4().hex
+    job = {
+        "job_id": job_id,
+        "video_filename": video_filename,
+        "force": force,
+        "status": "queued",
+        "created_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+        "started_at": None,
+        "finished_at": None,
+        "queue_wait_s": None,
+        "generation_s": None,
+        "total_s": None,
+        "result": None,
+        "error": None,
+        "error_code": None,
     }
-
-
+    with _summary_jobs_lock:
+        _summary_jobs[job_id] = job
+    worker = threading.Thread(
+        target=_run_summary_job,
+        args=(job_id, video_filename, force),
+        daemon=True,
+        name=f"summary_job_{job_id[:8]}",
+    )
+    worker.start()
+    return {
+        "job_id": job_id,
+        "video_filename": video_filename,
+        "status": "queued",
+        "force": force,
+    }
+@router.get("/summarize/jobs/{job_id}")
+def get_summary_job(job_id: str):
+    with _summary_jobs_lock:
+        job = _summary_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Summary job not found")
+    return job
 @router.post("/summarize-all")
 def summarize_all(force: bool = Query(False), db: Session = Depends(get_db)):
     results = VideoSummarizer(db).summarize_all(force=force)

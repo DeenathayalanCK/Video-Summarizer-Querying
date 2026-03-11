@@ -28,6 +28,24 @@ class Settings(BaseSettings):
     summary_model: str = Field("llama3.2:latest", alias="SUMMARY_MODEL")
     summary_num_ctx: int = Field(2048, alias="SUMMARY_NUM_CTX")
     summary_max_tokens: int = Field(300, alias="SUMMARY_MAX_TOKENS")
+    summary_track_limit: int = Field(6, alias="SUMMARY_TRACK_LIMIT")
+
+    # Ask / summary generation timeouts (seconds)
+    ask_timeout_seconds: int = Field(480, alias="ASK_TIMEOUT_SECONDS")
+    summary_timeout_seconds: int = Field(420, alias="SUMMARY_TIMEOUT_SECONDS")
+
+    # Retrieval breadth for Ask path (lower values reduce context fanout/latency)
+    qa_top_k_temporal: int = Field(6, alias="QA_TOP_K_TEMPORAL")
+    qa_top_k_object: int = Field(6, alias="QA_TOP_K_OBJECT")
+
+    # Auto-summarize control.
+    # true  → summary is generated automatically at end of each window/video (old behaviour).
+    # false → summary is skipped during pipeline; user triggers it on demand via
+    #         POST /api/v1/summarize/{video} or the Summary tab in the UI.
+    # Recommended: false for live mode (saves 60-120s of Ollama time per window,
+    # keeps the Ollama semaphore free for Ask queries sooner).
+    # Batch mode can keep true since it runs offline and time is not critical.
+    auto_summarize: bool = Field(True, alias="AUTO_SUMMARIZE")
 
     # Embedding model — for semantic search (768-dim)
     embed_model: str = Field(..., alias="EMBED_MODEL")
@@ -100,7 +118,10 @@ class Settings(BaseSettings):
     attribute_min_duration_seconds: float = Field(8.0, alias="ATTRIBUTE_MIN_DURATION_SECONDS")
     attribute_max_tracks_per_window: int = Field(4, alias="ATTRIBUTE_MAX_TRACKS_PER_WINDOW")
 
-    # Ollama workload lanes.
+    # Ollama workload lane (single shared queue across Ask + pipeline).
+    ollama_concurrency: int = Field(1, alias="OLLAMA_CONCURRENCY")
+    # Backward compatibility: older deployments still export split lane vars.
+    # They are ignored for lane separation now, but accepted to avoid startup failure.
     ask_ollama_concurrency: int = Field(1, alias="ASK_OLLAMA_CONCURRENCY")
     pipeline_ollama_concurrency: int = Field(1, alias="PIPELINE_OLLAMA_CONCURRENCY")
 

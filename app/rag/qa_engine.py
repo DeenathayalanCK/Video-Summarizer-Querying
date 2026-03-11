@@ -257,9 +257,10 @@ class QAEngine:
         self.settings = get_settings()
         self.logger = get_logger()
         self.db = db
-        self.caption_retriever = CaptionRetriever(db)
-        self.object_retriever = ObjectRetriever(db)
-        self.temporal_retriever = TemporalRetriever(db)
+        self.ask_timeout_s = max(30, self.settings.ask_timeout_seconds)
+        self.caption_retriever = CaptionRetriever(db, top_k=max(1, self.settings.qa_top_k_object))
+        self.object_retriever = ObjectRetriever(db, top_k=max(1, self.settings.qa_top_k_object))
+        self.temporal_retriever = TemporalRetriever(db, top_k=max(1, self.settings.qa_top_k_temporal))
         self.repo = EventRepository(db)
         self.model = self.settings.text_model
 
@@ -349,7 +350,7 @@ class QAEngine:
         # ── Layer 1: narrative summary (BUDGETED) ────────────────────────────
         # IMPORTANT: summary_context is injected into the prompt alongside
         # build_budgeted_context output. It MUST be capped independently or it
-        # blows past num_ctx=4096 (10 windows × ~300 tokens = 3000 extra tokens).
+        # blows past num_ctx=2048 (10 windows × ~300 tokens = 3000 extra tokens).
         # Cap each summary to ~1 sentence (80 tokens) and total to 500 tokens.
         summary_lines = []
         for vf in sorted(involved_videos):
@@ -374,7 +375,7 @@ class QAEngine:
         raw_events        = _build_raw_events_context(self.db, involved_videos, self.logger)
 
         # Assemble ALL context within strict token budget — summary now included
-        # so the total prompt never exceeds num_ctx=4096 regardless of window count.
+        # so the total prompt never exceeds num_ctx=2048 regardless of window count.
         full_context = build_budgeted_context(
             focused=focused_context,
             summary=raw_summary,
@@ -399,7 +400,7 @@ class QAEngine:
         }
         response = requests.post(
             f"{self.settings.ollama_host}/api/generate",
-            json=payload, timeout=600)
+            json=payload, timeout=(10, self.ask_timeout_s))
         response.raise_for_status()
         answer = response.json()["response"]
 
@@ -458,7 +459,7 @@ class QAEngine:
         }
         response = requests.post(
             f"{self.settings.ollama_host}/api/generate",
-            json=payload, timeout=600)
+            json=payload, timeout=(10, self.ask_timeout_s))
         response.raise_for_status()
         answer = response.json()["response"]
         self.logger.info("qa_engine_answered_captions", model=self.model)
@@ -575,7 +576,7 @@ class QAEngine:
                     "options": {"num_ctx": OLLAMA_NUM_CTX, "num_predict": 200},
                 },
                 stream=True,
-                timeout=600,
+                timeout=(10, self.ask_timeout_s),
             )
             resp.raise_for_status()
 

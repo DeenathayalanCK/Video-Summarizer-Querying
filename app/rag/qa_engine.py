@@ -34,7 +34,7 @@ from app.core.logging import get_logger
 from app.rag.retriever import CaptionRetriever
 from app.rag.object_retriever import ObjectRetriever
 from app.rag.temporal_retriever import TemporalRetriever
-from app.rag.context_budget import build_budgeted_context, OLLAMA_NUM_CTX
+from app.rag.context_budget import build_budgeted_context, OLLAMA_NUM_CTX, trim_to_budget
 from app.rag.fast_path import try_fast_path
 from app.rag.summarizer import _condense_caption
 from app.storage.repository import EventRepository
@@ -330,34 +330,54 @@ class QAEngine:
         for h in detection_hits:
             involved_videos.add(h["video_filename"])
 
+        # Guard: for "All videos" broad queries, cap to the most recent 8 windows.
+        # Querying 15+ windows blows the context budget even after trimming because
+        # the number of layers (memory, timeline, behaviour) scales with window count.
+        # The retriever already ranks by relevance — the most relevant windows come
+        # first; additional old windows add noise more than signal.
+        if not video_filename and len(involved_videos) > 8:
+            sorted_vids = sorted(involved_videos, reverse=True)  # lexicographic = newest first
+            involved_videos = set(sorted_vids[:8])
+            self.logger.info("qa_involved_videos_capped", total=len(sorted_vids), kept=8)
+
         if not involved_videos:
             return {
                 "answer": "No relevant detection data found to answer this question.",
                 "sources": [],
             }
 
-        # ── Layer 1: narrative summary ────────────────────────────────────────
+        # ── Layer 1: narrative summary (BUDGETED) ────────────────────────────
+        # IMPORTANT: summary_context is injected into the prompt alongside
+        # build_budgeted_context output. It MUST be capped independently or it
+        # blows past num_ctx=4096 (10 windows × ~300 tokens = 3000 extra tokens).
+        # Cap each summary to ~1 sentence (80 tokens) and total to 500 tokens.
         summary_lines = []
         for vf in sorted(involved_videos):
             s = self.db.query(VideoSummary).filter(
                 VideoSummary.video_filename == vf).first()
             if s and s.summary_text:
-                summary_lines.append(f"[{vf}]\n{s.summary_text}")
-        summary_context = "\n\n".join(summary_lines) if summary_lines else "No summary available."
+                # Take only first 2 sentences of each summary
+                sentences = s.summary_text.replace("\n", " ").split(". ")
+                short = ". ".join(sentences[:2]).strip()
+                if short and not short.endswith("."):
+                    short += "."
+                summary_lines.append(f"[{vf}] {short}")
+        raw_summary = "\n".join(summary_lines) if summary_lines else ""
 
         # ── Focused track context (Pass 1 output) ─────────────────────────────
         focused_context = self.temporal_retriever.render_contexts_as_text(track_contexts)
 
         # ── Broad context layers (Pass 2) ─────────────────────────────────────
-        memory_context   = _build_memory_context(self.db, involved_videos)
-        timeline_context = _build_timeline_context(self.db, involved_videos)
+        memory_context    = _build_memory_context(self.db, involved_videos)
+        timeline_context  = _build_timeline_context(self.db, involved_videos)
         behaviour_context = _build_behaviour_context(self.db, involved_videos)
-        raw_events       = _build_raw_events_context(self.db, involved_videos, self.logger)
+        raw_events        = _build_raw_events_context(self.db, involved_videos, self.logger)
 
-        # Assemble context within strict token budget to prevent Ollama timeout
-        # Each section is trimmed to its allocation; total guaranteed < num_ctx
+        # Assemble ALL context within strict token budget — summary now included
+        # so the total prompt never exceeds num_ctx=4096 regardless of window count.
         full_context = build_budgeted_context(
             focused=focused_context,
+            summary=raw_summary,
             memory=memory_context,
             behaviour=behaviour_context,
             timeline=timeline_context,
@@ -368,13 +388,13 @@ class QAEngine:
             "model": self.model,
             "system": QA_DETECTION_SYSTEM_PROMPT,
             "prompt": QA_DETECTION_USER_TEMPLATE.format(
-                summary=summary_context,
+                summary="(included in context below)",
                 events=full_context,
                 question=question),
             "stream": False,
             "options": {
-                "num_ctx": OLLAMA_NUM_CTX,   # explicitly set context window
-                "num_predict": 512,           # cap response length — answers don't need 4096 tokens
+                "num_ctx": OLLAMA_NUM_CTX,
+                "num_predict": 200,
             },
         }
         response = requests.post(
@@ -433,7 +453,7 @@ class QAEngine:
             "stream": False,
             "options": {
                 "num_ctx": OLLAMA_NUM_CTX,
-                "num_predict": 512,
+                "num_predict": 200,
             },
         }
         response = requests.post(
@@ -508,8 +528,12 @@ class QAEngine:
             s = self.db.query(VideoSummary).filter(
                 VideoSummary.video_filename == vf).first()
             if s and s.summary_text:
-                summary_lines.append(f"[{vf}]\n{s.summary_text}")
-        summary_context = "\n\n".join(summary_lines) if summary_lines else "No summary available."
+                sentences = s.summary_text.replace("\n", " ").split(". ")
+                short = ". ".join(sentences[:2]).strip()
+                if short and not short.endswith("."):
+                    short += "."
+                summary_lines.append(f"[{vf}] {short}")
+        raw_summary = "\n".join(summary_lines) if summary_lines else ""
 
         focused_context   = self.temporal_retriever.render_contexts_as_text(track_contexts)
         memory_context    = _build_memory_context(self.db, involved_videos)
@@ -518,13 +542,13 @@ class QAEngine:
         raw_events        = _build_raw_events_context(self.db, involved_videos, self.logger)
 
         full_context = build_budgeted_context(
-            focused=focused_context, memory=memory_context,
+            focused=focused_context, summary=raw_summary, memory=memory_context,
             behaviour=behaviour_context, timeline=timeline_context,
             raw_events=raw_events,
         )
 
         prompt = QA_DETECTION_USER_TEMPLATE.format(
-            summary=summary_context, events=full_context, question=question)
+            summary="(included in context below)", events=full_context, question=question)
 
         sources = []
         for ctx in track_contexts:
@@ -548,7 +572,7 @@ class QAEngine:
                     "system": QA_DETECTION_SYSTEM_PROMPT,
                     "prompt": prompt,
                     "stream": True,
-                    "options": {"num_ctx": OLLAMA_NUM_CTX, "num_predict": 512},
+                    "options": {"num_ctx": OLLAMA_NUM_CTX, "num_predict": 200},
                 },
                 stream=True,
                 timeout=600,

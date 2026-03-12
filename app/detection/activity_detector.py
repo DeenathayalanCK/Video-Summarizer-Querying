@@ -178,6 +178,18 @@ class ActivityCaptioner:
     def caption(self, crop_path: str) -> Optional[str]:
         if not crop_path or not os.path.exists(crop_path):
             return None
+        # Acquire semaphore at pipeline priority (10) per call — releases between
+        # tracks so Ask queries (priority 0) can run without waiting for the whole batch.
+        sem = None
+        try:
+            from app.vision.window_manager import WindowManager
+            wm = WindowManager.get_instance()
+            if wm is not None:
+                sem = wm._ollama_sem
+        except Exception:
+            pass
+        if sem is not None:
+            sem.acquire(priority=10, blocking=True)
         try:
             import base64, requests, time as _time
             from app.core.ollama_logger import OllamaCallTimer
@@ -210,6 +222,9 @@ class ActivityCaptioner:
                     _ot.error  = f"HTTP {resp.status_code}"
         except Exception as e:
             self.logger.debug("activity_caption_failed", crop=crop_path, error=str(e))
+        finally:
+            if sem is not None:
+                sem.release()
         return None
 
 
@@ -274,7 +289,7 @@ def write_activity_snapshot(track, window_key: str, wall_time: datetime, db):
         except Exception: pass
 
 
-def run_activity_captions_for_window(video_filename: str, db, yield_cb=None) -> int:
+def run_activity_captions_for_window(video_filename: str, db) -> int:
     """
     Post-window: minicpm-v caption for every entry TrackEvent that has a crop.
 
@@ -310,9 +325,6 @@ def run_activity_captions_for_window(video_filename: str, db, yield_cb=None) -> 
     )
     captioned = 0
     for ev in events:
-        # Yield semaphore to higher-priority Ask queries between tracks
-        if yield_cb is not None:
-            yield_cb()
 
         # Enforce total budget — stop early if we're over time
         if _time.monotonic() - t_start > BUDGET_SEC:

@@ -26,6 +26,16 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.prompts.attribute_prompt import VEHICLE_ATTRIBUTE_PROMPT, PERSON_ATTRIBUTE_PROMPT
 
+# Lazy import to avoid circular deps — resolved at call time
+def _get_pipeline_sem():
+    """Return the WindowManager's _PriorityLane so per-call acquire/release works."""
+    try:
+        from app.vision.window_manager import WindowManager
+        wm = WindowManager.get_instance()
+        return wm._ollama_sem if wm is not None else None
+    except Exception:
+        return None
+
 
 # ── Result types ───────────────────────────────────────────────────────────────
 
@@ -146,6 +156,9 @@ class BaseAttributeExtractor:
     def _call_vision_model(self, image_b64: str, prompt: str) -> Optional[str]:
         """
         Call minicpm-v with a crop image and prompt.
+        Acquires the Ollama semaphore at PIPELINE priority (10) for the duration
+        of the HTTP call only — releasing between tracks so Ask queries (priority 0)
+        can slip in without waiting for the entire attribution batch.
         Returns raw text response or None on failure.
         """
         payload = {
@@ -166,6 +179,13 @@ class BaseAttributeExtractor:
         if not self.model or not self.model.strip():
             self.logger.info("attribute_extraction_skipped", reason="no_multimodal_model")
             return None
+
+        # Acquire semaphore at pipeline priority (10) — Ask queries at priority 0
+        # will be served first on next release, breaking up the attribution batch.
+        sem = _get_pipeline_sem()
+        PIPELINE_PRIORITY = 10
+        if sem is not None:
+            sem.acquire(priority=PIPELINE_PRIORITY, blocking=True)
 
         try:
             with OllamaCallTimer(
@@ -193,6 +213,9 @@ class BaseAttributeExtractor:
         except Exception as e:
             self.logger.warning("attribute_extraction_failed", error=str(e))
             return None
+        finally:
+            if sem is not None:
+                sem.release()
 
     def _extract_json(self, text: str) -> Optional[dict]:
         """

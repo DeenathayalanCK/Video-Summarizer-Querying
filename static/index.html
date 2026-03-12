@@ -2592,6 +2592,14 @@
           html += `<div class="mt-1 text-xs text-gray-600">😶 No face detected</div>`;
         }
 
+        // Raw moondream description (set by attribute_extractor on every LLM call)
+        if (attrs.moondream_raw && attrs.moondream_raw.trim()) {
+          const safeDesc = attrs.moondream_raw
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+          html += `<div class="text-xs text-gray-500 italic mt-1.5 leading-snug">📝 ${safeDesc}</div>`;
+        }
+
         return html;
       }
 

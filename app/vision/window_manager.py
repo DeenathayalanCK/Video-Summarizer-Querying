@@ -328,35 +328,6 @@ class WindowManager:
         # Pipeline: lowest priority (10) — yields to Ask queries.
         return self.ollama_ctx(f"pipeline_{step_name}", key=key, priority=self.PRIORITY_PIPELINE)
 
-    def pipeline_yield_point(self, key: str, step_name: str):
-        """
-        Call between individual Ollama operations inside a pipeline step.
-        If a higher-priority waiter (Ask) is queued, temporarily releases
-        the semaphore so Ask can run, then re-acquires for the pipeline.
-
-        Must be called while the pipeline thread holds the semaphore.
-        """
-        has_higher = False
-        with self._ollama_sem._mutex:
-            for p, _, _ in self._ollama_sem._waiters:
-                if p < self.PRIORITY_PIPELINE:
-                    has_higher = True
-                    break
-        if has_higher:
-            self.logger.info("pipeline_yielding_for_ask", key=key, step=step_name)
-            self._ollama_sem.release()
-            # Brief sleep so the Ask thread can grab the slot
-            time.sleep(0.2)
-            # Re-acquire at pipeline priority (blocks until Ask finishes)
-            self._ollama_sem.acquire(priority=self.PRIORITY_PIPELINE, blocking=True)
-            self.logger.info("pipeline_resumed_after_yield", key=key, step=step_name)
-
-    def _make_yield_cb(self, key: str, step_name: str):
-        """Create a yield callback for passing to processors."""
-        def _cb():
-            self.pipeline_yield_point(key, step_name)
-        return _cb
-
     def _log_step_result(self, key: str, step_name: str, started_at: float, status: str, **meta):
         elapsed_s = round(time.monotonic() - started_at, 1)
         self.logger.info(
@@ -407,13 +378,11 @@ class WindowManager:
 
                     settings = _gs_attr()
                     if settings.enable_phase_6b and settings.attribute_policy not in ("off", "manual_only"):
-                        self.logger.info("window_attrs_waiting_sem", key=key)
-                        with self._pipeline_ollama_ctx(key, "attrs"):
-                            self.logger.info("window_attrs_sem_acquired", key=key)
-                            from app.detection.attribute_processor import AttributeProcessor
-
-                            n_attr = AttributeProcessor(db).run(
-                                key, yield_cb=self._make_yield_cb(key, "attrs"))
+                        from app.detection.attribute_processor import AttributeProcessor
+                        self.logger.info("window_attrs_start", key=key)
+                        # Semaphore is acquired per-Ollama-call inside attribute_extractor,
+                        # so Ask queries can slip in between individual track attributions.
+                        n_attr = AttributeProcessor(db).run(key)
                         self._mark_step_completed(db, key, "attrs_completed")
                         self._log_step_result(
                             key,
@@ -478,13 +447,9 @@ class WindowManager:
 
                     settings = _gs_act()
                     if settings.enable_activity_captions and settings.multimodal_model:
-                        self.logger.info("window_activity_waiting_sem", key=key)
-                        with self._pipeline_ollama_ctx(key, "activity"):
-                            self.logger.info("window_activity_sem_acquired", key=key)
-                            from app.detection.activity_detector import run_activity_captions_for_window
-
-                            n_cap = run_activity_captions_for_window(
-                                key, db, yield_cb=self._make_yield_cb(key, "activity"))
+                        from app.detection.activity_detector import run_activity_captions_for_window
+                        self.logger.info("window_activity_start", key=key)
+                        n_cap = run_activity_captions_for_window(key, db)
                         self._mark_step_completed(db, key, "activity_completed")
                         self._log_step_result(
                             key,

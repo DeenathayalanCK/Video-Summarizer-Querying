@@ -260,7 +260,12 @@ def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
         # OllamaLaneBusyError is raised if pipeline holds the lock past the timeout.
         wm = WindowManager.get_instance()
         try:
+            # Emit "waiting" immediately so frontend can show waiting state
+            # while the semaphore is being acquired (pipeline may be running).
+            yield f"data: {_json.dumps({'waiting': True})}\n\n"
             with wm.ask_ollama_ctx():
+                # Semaphore acquired — LLM is now running
+                yield f"data: {_json.dumps({'thinking': True})}\n\n"
                 yield from engine.stream_ask(
                     question=body.question,
                     video_filename=body.video_filename,

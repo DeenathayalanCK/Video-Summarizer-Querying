@@ -1755,7 +1755,15 @@
             const safeDesc = rawDesc
               .replace(/</g, "&lt;")
               .replace(/>/g, "&gt;");
-            attrHtml += `<div class="text-xs text-gray-500 italic mt-1.5 leading-snug">📝 ${safeDesc}</div>`;
+            const capId2 = "cap-" + Math.random().toString(36).slice(2, 8);
+            attrHtml += `
+              <div class="text-xs text-gray-500 italic mt-1.5 leading-snug" id="${capId2}">
+                <span class="caption-preview" style="display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;"
+                  title="Click to expand"
+                  onclick="(function(el){var f=el.parentElement.querySelector('.caption-full');f.style.display='block';el.style.display='none';})(this)">📝 ${safeDesc}</span>
+                <span class="caption-full" style="display:none;white-space:pre-wrap;cursor:pointer;"
+                  onclick="(function(el){var p=el.parentElement.querySelector('.caption-preview');el.style.display='none';p.style.display='block';})(this)">📝 ${safeDesc}</span>
+              </div>`;
           }
         }
 
@@ -1911,7 +1919,7 @@
             <div class="flex items-center gap-2 mb-3">
               <i data-lucide="sparkles" class="w-4 h-4 text-indigo-400"></i>
               <span class="text-sm font-medium">Answer</span>
-              <span id="ask-status-badge" class="ml-auto text-xs text-gray-500 animate-pulse">thinking...</span>
+              <span id="ask-status-badge" class="ml-auto text-xs text-amber-400 animate-pulse">⏳ waiting for Ollama...</span>
             </div>
             <div id="ask-answer-text" class="prose-surveillance text-sm text-gray-200 leading-relaxed whitespace-pre-wrap"></div>
           </div>
@@ -1961,7 +1969,28 @@
                 continue;
               }
 
+              if (msg.waiting) {
+                const badge = document.getElementById("ask-status-badge");
+                badge.textContent = "⏳ waiting for Ollama...";
+                badge.className =
+                  "ml-auto text-xs text-amber-400 animate-pulse";
+              }
+
+              if (msg.thinking) {
+                const badge = document.getElementById("ask-status-badge");
+                badge.textContent = "💭 thinking...";
+                badge.className =
+                  "ml-auto text-xs text-indigo-400 animate-pulse";
+              }
+
               if (msg.token !== undefined) {
+                // First token: switch badge to "generating..."
+                if (!fullAnswer) {
+                  const badge = document.getElementById("ask-status-badge");
+                  badge.textContent = "✍ generating...";
+                  badge.className =
+                    "ml-auto text-xs text-indigo-300 animate-pulse";
+                }
                 fullAnswer += msg.token;
                 document.getElementById("ask-answer-text").textContent =
                   fullAnswer;
@@ -2592,12 +2621,28 @@
           html += `<div class="mt-1 text-xs text-gray-600">😶 No face detected</div>`;
         }
 
-        // Raw moondream description (set by attribute_extractor on every LLM call)
+        // Raw moondream description — one line truncated, click to expand
         if (attrs.moondream_raw && attrs.moondream_raw.trim()) {
           const safeDesc = attrs.moondream_raw
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;");
-          html += `<div class="text-xs text-gray-500 italic mt-1.5 leading-snug">📝 ${safeDesc}</div>`;
+          const capId = "cap-" + Math.random().toString(36).slice(2, 8);
+          html += `
+            <div class="text-xs text-gray-500 italic mt-1.5 leading-snug" id="${capId}">
+              <span class="caption-preview" style="display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;"
+                title="Click to expand"
+                onclick="(function(el){
+                  var preview = el;
+                  var full = el.parentElement.querySelector('.caption-full');
+                  if(full.style.display==='none'){full.style.display='block';preview.style.display='none';}
+                })(this)">📝 ${safeDesc}</span>
+              <span class="caption-full" style="display:none;white-space:pre-wrap;cursor:pointer;"
+                onclick="(function(el){
+                  var full = el;
+                  var preview = el.parentElement.querySelector('.caption-preview');
+                  full.style.display='none';preview.style.display='block';
+                })(this)">📝 ${safeDesc}</span>
+            </div>`;
         }
 
         return html;

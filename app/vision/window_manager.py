@@ -30,6 +30,10 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 
 
+class OllamaLaneBusyError(RuntimeError):
+    """Raised when the Ask lane cannot acquire the Ollama semaphore within the timeout."""
+
+
 class WindowManager:
     """
     Singleton. Manages the current 5-minute window key and triggers
@@ -214,15 +218,27 @@ class WindowManager:
             setattr(ps, attr_name, True)
             db.commit()
 
-    def ollama_ctx(self, lane: str, key: Optional[str] = None):
+    def ollama_ctx(self, lane: str, key: Optional[str] = None, timeout: Optional[float] = None):
         import contextlib
 
         @contextlib.contextmanager
         def _ctx():
             wait_start = time.monotonic()
             self.logger.info("ollama_lane_waiting", lane=lane, key=key)
-            self._ollama_sem.acquire(blocking=True)
+            if timeout is not None:
+                acquired = self._ollama_sem.acquire(blocking=True, timeout=timeout)
+            else:
+                acquired = self._ollama_sem.acquire(blocking=True)
             waited_s = round(time.monotonic() - wait_start, 3)
+            if not acquired:
+                self.logger.warning(
+                    "ollama_lane_timeout",
+                    lane=lane, key=key, waited_s=waited_s,
+                )
+                raise OllamaLaneBusyError(
+                    f"Ollama is busy processing video pipeline tasks. "
+                    f"Waited {waited_s:.0f}s. Please try again in a few minutes."
+                )
             self.logger.info("ollama_lane_acquired", lane=lane, key=key, waited_s=waited_s)
             try:
                 yield {"waited_s": waited_s}
@@ -233,7 +249,10 @@ class WindowManager:
         return _ctx()
 
     def ask_ollama_ctx(self):
-        return self.ollama_ctx("ask")
+        # Ask lane uses a timeout so it never blocks indefinitely behind pipeline tasks.
+        # Default: 60s wait. Override via ASK_LANE_TIMEOUT_SECONDS in .env.
+        ask_timeout = float(getattr(self.settings, "ask_lane_timeout_seconds", 60))
+        return self.ollama_ctx("ask", timeout=ask_timeout)
 
     def _pipeline_ollama_ctx(self, key: str, step_name: str):
         return self.ollama_ctx(f"pipeline_{step_name}", key=key)
@@ -684,6 +703,3 @@ class WindowManager:
             except Exception: pass
         finally:
             db.close()
-
-
-

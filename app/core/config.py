@@ -32,6 +32,8 @@ class Settings(BaseSettings):
 
     # Ask / summary generation timeouts (seconds)
     ask_timeout_seconds: int = Field(480, alias="ASK_TIMEOUT_SECONDS")
+    # Max seconds Ask will wait for the Ollama semaphore before returning busy error
+    ask_lane_timeout_seconds: int = Field(60, alias="ASK_LANE_TIMEOUT_SECONDS")
     summary_timeout_seconds: int = Field(420, alias="SUMMARY_TIMEOUT_SECONDS")
 
     # Retrieval breadth for Ask path (lower values reduce context fanout/latency)

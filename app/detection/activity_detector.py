@@ -179,25 +179,35 @@ class ActivityCaptioner:
         if not crop_path or not os.path.exists(crop_path):
             return None
         try:
-            import base64, requests
+            import base64, requests, time as _time
+            from app.core.ollama_logger import OllamaCallTimer
             with open(crop_path, "rb") as f:
                 img_b64 = base64.b64encode(f.read()).decode()
-            resp = requests.post(
-                f"{self.ollama_host}/api/generate",
-                json={
-                    "model":  self.model,
-                    "prompt": self._PROMPT,
-                    "images": [img_b64],
-                    "stream": False,
-                    "options": {"num_predict": 30, "temperature": 0.1, "num_ctx": 2048},
-                },
-                timeout=(5, 60),  # (connect_timeout, read_timeout)
-            )
-            if resp.status_code == 200:
-                raw     = resp.json().get("response", "").strip()
-                caption = raw.split(".")[0].strip().strip('"\'')
-                if len(caption) > 5:
-                    return caption
+            with OllamaCallTimer(
+                call_type="activity",
+                model=self.model,
+                prompt=self._PROMPT,
+            ) as _ot:
+                resp = requests.post(
+                    f"{self.ollama_host}/api/generate",
+                    json={
+                        "model":  self.model,
+                        "prompt": self._PROMPT,
+                        "images": [img_b64],
+                        "stream": False,
+                        "options": {"num_predict": 30, "temperature": 0.1, "num_ctx": 2048},
+                    },
+                    timeout=(5, 60),
+                )
+                if resp.status_code == 200:
+                    raw     = resp.json().get("response", "").strip()
+                    caption = raw.split(".")[0].strip().strip('"\'')
+                    _ot.response = raw
+                    if len(caption) > 5:
+                        return caption
+                else:
+                    _ot.status = "error"
+                    _ot.error  = f"HTTP {resp.status_code}"
         except Exception as e:
             self.logger.debug("activity_caption_failed", crop=crop_path, error=str(e))
         return None

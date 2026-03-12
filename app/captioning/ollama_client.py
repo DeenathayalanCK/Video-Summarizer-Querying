@@ -3,6 +3,7 @@ import base64
 import cv2
 
 from app.core.config import get_settings
+from app.core.ollama_logger import OllamaCallTimer
 from app.prompts.caption_prompt import CAPTION_PROMPT
 
 
@@ -40,15 +41,21 @@ class OllamaMultimodalClient:
             "options": {
                 "num_predict": self.settings.caption_max_tokens,
                 "temperature": 0.1,
-                "num_ctx": 2048,  # KV cache: 2048 sufficient for single-frame captions
+                "num_ctx": 2048,
             },
         }
 
-        response = requests.post(
-            f"{self.base_url}/api/generate",
-            json=payload,
-            # FIX: use config value instead of hardcoded 700
-            timeout=self.settings.caption_timeout_seconds,
-        )
-        response.raise_for_status()
-        return response.json()["response"]
+        with OllamaCallTimer(
+            call_type="caption",
+            model=self.model,
+            prompt=self.prompt,
+        ) as _ot:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=self.settings.caption_timeout_seconds,
+            )
+            response.raise_for_status()
+            result = response.json()["response"]
+            _ot.response = result
+        return result

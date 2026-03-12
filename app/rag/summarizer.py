@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.ollama_logger import log_call
 from app.prompts.summary_prompt import SUMMARY_SYSTEM_PROMPT, SUMMARY_USER_TEMPLATE
 from app.prompts.track_summary_prompt import TRACK_SUMMARY_SYSTEM_PROMPT, TRACK_SUMMARY_USER_TEMPLATE
 from app.storage.models import Caption, TrackEvent, VideoSummary
@@ -116,6 +117,15 @@ class VideoSummarizer:
             summary_text = response.json().get("response", "").strip()
             if not summary_text:
                 raise ValueError("empty response from Ollama")
+            elapsed_ms = (time.monotonic() - start) * 1000
+            log_call(
+                call_type="summary",
+                model=self.model,
+                prompt=f"[{prompt_kind}] {user_message[:800]}",
+                response=summary_text,
+                elapsed_ms=elapsed_ms,
+                status="ok",
+            )
             self.logger.info(
                 "summarize_request_done",
                 video=video_filename,
@@ -127,6 +137,11 @@ class VideoSummarizer:
             return summary_text
         except requests.exceptions.Timeout as exc:
             elapsed_s = round(time.monotonic() - start, 1)
+            log_call(
+                call_type="summary", model=self.model,
+                prompt=f"[{prompt_kind}] {user_message[:800]}",
+                elapsed_ms=elapsed_s * 1000, status="timeout", error=str(exc),
+            )
             self.logger.warning(
                 "summarize_timeout",
                 video=video_filename,
@@ -141,6 +156,11 @@ class VideoSummarizer:
             ) from exc
         except requests.exceptions.RequestException as exc:
             elapsed_s = round(time.monotonic() - start, 1)
+            log_call(
+                call_type="summary", model=self.model,
+                prompt=f"[{prompt_kind}] {user_message[:800]}",
+                elapsed_ms=elapsed_s * 1000, status="error", error=str(exc),
+            )
             self.logger.warning(
                 "summarize_request_error",
                 video=video_filename,
@@ -444,5 +464,3 @@ class VideoSummarizer:
             except Exception as exc:
                 self.logger.error("summary_failed", video=video_filename, error=str(exc))
         return results
-
-

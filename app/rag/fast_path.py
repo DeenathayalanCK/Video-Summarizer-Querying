@@ -64,6 +64,15 @@ _OBJECT_CLASSES = {
     "bicycle": ["bicycle", "cycle", "cyclist"],
 }
 
+# Keywords that indicate a carrying/accessory query — NOT a YOLO object_class
+# but stored in TrackEvent.attributes['carrying'] via moondream + YOLO wiring
+_CARRYING_KEYWORDS = {
+    "backpack": ["backpack", "rucksack", "knapsack"],
+    "bag":      ["bag", "handbag", "purse", "tote"],
+    "luggage":  ["luggage", "suitcase", "trolley", "baggage"],
+    "briefcase":["briefcase"],
+}
+
 
 def _fmt(s: float) -> str:
     """Format a timestamp for display.
@@ -474,6 +483,79 @@ def _resolve_identity(db, q: str, video_filename: Optional[str]) -> dict:
     }
 
 
+def _resolve_carrying(db, q: str, video_filename: Optional[str]) -> dict:
+    """
+    Answer 'is there anyone with a backpack / bag / luggage?' type questions.
+
+    YOLO detects backpack/handbag/suitcase as nearby objects and wires them
+    into TrackEvent.attributes['carrying'].  moondream also extracts carrying
+    from crop images.  Neither ends up as a TrackEvent.object_class, so the
+    normal _detect_class path misses them entirely.
+
+    This resolver searches the JSONB attributes field directly.
+    """
+    q_lower = q.lower()
+
+    # Detect which carrying keyword is being asked about
+    carrying_type: Optional[str] = None
+    for label, keywords in _CARRYING_KEYWORDS.items():
+        if any(k in q_lower for k in keywords):
+            carrying_type = label
+            break
+
+    if carrying_type is None:
+        return {"answered": False}
+
+    # Search TrackEvent.attributes->>'carrying' for the keyword group
+    from app.storage.models import TrackEvent as _TE
+    from sqlalchemy import cast, String
+
+    q_db = db.query(_TE).filter(_TE.event_type == "entry")
+    if video_filename:
+        q_db = q_db.filter(_TE.video_filename == video_filename)
+    all_entry_events = q_db.order_by(_TE.first_seen_second).all()
+
+    keywords_for_type = _CARRYING_KEYWORDS[carrying_type]
+    matches = [
+        ev for ev in all_entry_events
+        if any(
+            k in str((ev.attributes or {}).get("carrying", "")).lower()
+            for k in keywords_for_type
+        )
+    ]
+
+    if not matches:
+        return {
+            "answered": True,
+            "answer": f"No — no person carrying a {carrying_type} was detected in the footage.",
+            "sources": [],
+        }
+
+    lines = []
+    for ev in matches[:5]:
+        attrs = ev.attributes or {}
+        carrying_val = attrs.get("carrying", carrying_type)
+        top    = attrs.get("clothing_top", "") or attrs.get("clothing_top_color", "")
+        gender = attrs.get("gender_estimate", "")
+        parts  = [p for p in [gender, top] if p and p not in ("unknown", "none", "")]
+        desc   = ", ".join(parts) if parts else "person"
+        lines.append(
+            f"Track #{ev.track_id}: **{desc}** carrying **{carrying_val}** — "
+            f"seen {_fmt(ev.first_seen_second)}–{_fmt(ev.last_seen_second)} "
+            f"in `{ev.video_filename}`"
+        )
+
+    answer = (
+        f"Yes — **{len(matches)}** person(s) carrying a {carrying_type} detected:\n"
+        + "\n".join(lines)
+    )
+    return {
+        "answered": True,
+        "answer": answer,
+        "sources": [_source_from_event(ev) for ev in matches[:4]],
+    }
+
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 def try_fast_path(
@@ -528,6 +610,17 @@ def try_fast_path(
         result = _resolve_identity(db, q, video_filename)
         if result["answered"]:
             result["fast_path_type"] = "identity"
+            return result
+
+    # Carrying/accessory query — backpack, bag, luggage etc.
+    # Must run before presence so "anyone with backpack" hits here first
+    carrying_keywords = ["backpack", "rucksack", "bag", "handbag", "purse",
+                         "luggage", "suitcase", "briefcase", "carrying"]
+    if any(k in q.lower() for k in carrying_keywords):
+        _log.info("fast_path_triggered", type="carrying", question=q)
+        result = _resolve_carrying(db, q, video_filename)
+        if result["answered"]:
+            result["fast_path_type"] = "carrying"
             return result
 
     # Presence query — simple yes/no

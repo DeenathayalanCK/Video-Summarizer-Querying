@@ -21,6 +21,8 @@ Cross-boundary tracks:
   AND re-opens it in the new window. This is handled in live_stream_processor.py.
 """
 
+import heapq
+import itertools
 import threading
 import time
 from datetime import datetime, timedelta
@@ -32,6 +34,62 @@ from app.core.logging import get_logger
 
 class OllamaLaneBusyError(RuntimeError):
     """Raised when the Ask lane cannot acquire the Ollama semaphore within the timeout."""
+
+
+class _PriorityLane:
+    """
+    Drop-in replacement for threading.Semaphore with priority support.
+    Lower priority number = served first (0 = highest priority).
+
+    When multiple threads are waiting and a slot is released, the thread
+    with the lowest priority number receives it. Ties are broken in FIFO order.
+    """
+
+    def __init__(self, value: int = 1):
+        self._mutex = threading.Lock()
+        self._value = value
+        self._waiters: list = []  # min-heap: (priority, seq, Event)
+        self._seq_gen = itertools.count()
+
+    def acquire(self, priority: int = 10, blocking: bool = True,
+                timeout: Optional[float] = None) -> bool:
+        deadline = (time.monotonic() + timeout) if timeout is not None else None
+        with self._mutex:
+            if self._value > 0:
+                self._value -= 1
+                return True
+            if not blocking:
+                return False
+            evt = threading.Event()
+            entry = (priority, next(self._seq_gen), evt)
+            heapq.heappush(self._waiters, entry)
+
+        wait_secs = None if deadline is None else max(0.0, deadline - time.monotonic())
+        acquired = evt.wait(timeout=wait_secs)
+        if acquired:
+            return True
+        # Timed out — remove our entry from the queue
+        with self._mutex:
+            try:
+                self._waiters.remove(entry)
+                heapq.heapify(self._waiters)
+            except ValueError:
+                # release() granted us the slot just as we timed out.
+                # We can't use it, so pass it on to the next waiter.
+                self._release_next()
+        return False
+
+    def release(self):
+        with self._mutex:
+            self._release_next()
+
+    def _release_next(self):
+        """Must be called with self._mutex held."""
+        if self._waiters:
+            _, _, evt = heapq.heappop(self._waiters)
+            evt.set()  # hand slot directly to highest-priority waiter
+        else:
+            self._value += 1
 
 
 class WindowManager:
@@ -61,9 +119,11 @@ class WindowManager:
         self._process_queue  = []  # list of window keys awaiting post-processing
         self._queued_keys    = set()
 
-        # Single shared semaphore across Ask + pipeline Ollama generate calls.
-        # This avoids CPU contention where concurrent generations cause long-tail timeouts.
-        self._ollama_sem = threading.Semaphore(
+        # Priority-aware lane shared across Ask + pipeline Ollama generate calls.
+        # Ask queries get priority=0 (served first), pipeline steps get priority=10.
+        # This ensures user Ask queries jump ahead of background post-processing
+        # and are served on the very next slot release.
+        self._ollama_sem = _PriorityLane(
             max(1, self.settings.ollama_concurrency, self.settings.ask_ollama_concurrency, self.settings.pipeline_ollama_concurrency)
         )
 
@@ -218,28 +278,38 @@ class WindowManager:
             setattr(ps, attr_name, True)
             db.commit()
 
-    def ollama_ctx(self, lane: str, key: Optional[str] = None, timeout: Optional[float] = None):
+    # Priority constants for the Ollama lane.
+    # Lower number = higher priority = served first when slot is released.
+    PRIORITY_ASK      = 0   # Interactive user queries — highest priority
+    PRIORITY_USER_API = 5   # User-triggered API calls (manual summary, etc.)
+    PRIORITY_PIPELINE  = 10  # Background post-processing steps
+
+    def ollama_ctx(self, lane: str, key: Optional[str] = None,
+                   timeout: Optional[float] = None, priority: int = PRIORITY_USER_API):
         import contextlib
 
         @contextlib.contextmanager
         def _ctx():
             wait_start = time.monotonic()
-            self.logger.info("ollama_lane_waiting", lane=lane, key=key)
+            self.logger.info("ollama_lane_waiting", lane=lane, key=key, priority=priority)
             if timeout is not None:
-                acquired = self._ollama_sem.acquire(blocking=True, timeout=timeout)
+                acquired = self._ollama_sem.acquire(
+                    priority=priority, blocking=True, timeout=timeout)
             else:
-                acquired = self._ollama_sem.acquire(blocking=True)
+                acquired = self._ollama_sem.acquire(
+                    priority=priority, blocking=True)
             waited_s = round(time.monotonic() - wait_start, 3)
             if not acquired:
                 self.logger.warning(
                     "ollama_lane_timeout",
-                    lane=lane, key=key, waited_s=waited_s,
+                    lane=lane, key=key, waited_s=waited_s, priority=priority,
                 )
                 raise OllamaLaneBusyError(
                     f"Ollama is busy processing video pipeline tasks. "
                     f"Waited {waited_s:.0f}s. Please try again in a few minutes."
                 )
-            self.logger.info("ollama_lane_acquired", lane=lane, key=key, waited_s=waited_s)
+            self.logger.info("ollama_lane_acquired", lane=lane, key=key,
+                             waited_s=waited_s, priority=priority)
             try:
                 yield {"waited_s": waited_s}
             finally:
@@ -249,13 +319,43 @@ class WindowManager:
         return _ctx()
 
     def ask_ollama_ctx(self):
-        # Ask lane uses a timeout so it never blocks indefinitely behind pipeline tasks.
-        # Default: 60s wait. Override via ASK_LANE_TIMEOUT_SECONDS in .env.
+        # Ask lane: highest priority (0) so it jumps ahead of any queued pipeline steps.
+        # Uses a timeout so it never blocks indefinitely.
         ask_timeout = float(getattr(self.settings, "ask_lane_timeout_seconds", 60))
-        return self.ollama_ctx("ask", timeout=ask_timeout)
+        return self.ollama_ctx("ask", timeout=ask_timeout, priority=self.PRIORITY_ASK)
 
     def _pipeline_ollama_ctx(self, key: str, step_name: str):
-        return self.ollama_ctx(f"pipeline_{step_name}", key=key)
+        # Pipeline: lowest priority (10) — yields to Ask queries.
+        return self.ollama_ctx(f"pipeline_{step_name}", key=key, priority=self.PRIORITY_PIPELINE)
+
+    def pipeline_yield_point(self, key: str, step_name: str):
+        """
+        Call between individual Ollama operations inside a pipeline step.
+        If a higher-priority waiter (Ask) is queued, temporarily releases
+        the semaphore so Ask can run, then re-acquires for the pipeline.
+
+        Must be called while the pipeline thread holds the semaphore.
+        """
+        has_higher = False
+        with self._ollama_sem._mutex:
+            for p, _, _ in self._ollama_sem._waiters:
+                if p < self.PRIORITY_PIPELINE:
+                    has_higher = True
+                    break
+        if has_higher:
+            self.logger.info("pipeline_yielding_for_ask", key=key, step=step_name)
+            self._ollama_sem.release()
+            # Brief sleep so the Ask thread can grab the slot
+            time.sleep(0.2)
+            # Re-acquire at pipeline priority (blocks until Ask finishes)
+            self._ollama_sem.acquire(priority=self.PRIORITY_PIPELINE, blocking=True)
+            self.logger.info("pipeline_resumed_after_yield", key=key, step=step_name)
+
+    def _make_yield_cb(self, key: str, step_name: str):
+        """Create a yield callback for passing to processors."""
+        def _cb():
+            self.pipeline_yield_point(key, step_name)
+        return _cb
 
     def _log_step_result(self, key: str, step_name: str, started_at: float, status: str, **meta):
         elapsed_s = round(time.monotonic() - started_at, 1)
@@ -312,7 +412,8 @@ class WindowManager:
                             self.logger.info("window_attrs_sem_acquired", key=key)
                             from app.detection.attribute_processor import AttributeProcessor
 
-                            n_attr = AttributeProcessor(db).run(key)
+                            n_attr = AttributeProcessor(db).run(
+                                key, yield_cb=self._make_yield_cb(key, "attrs"))
                         self._mark_step_completed(db, key, "attrs_completed")
                         self._log_step_result(
                             key,
@@ -382,7 +483,8 @@ class WindowManager:
                             self.logger.info("window_activity_sem_acquired", key=key)
                             from app.detection.activity_detector import run_activity_captions_for_window
 
-                            n_cap = run_activity_captions_for_window(key, db)
+                            n_cap = run_activity_captions_for_window(
+                                key, db, yield_cb=self._make_yield_cb(key, "activity"))
                         self._mark_step_completed(db, key, "activity_completed")
                         self._log_step_result(
                             key,

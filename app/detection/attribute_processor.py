@@ -103,7 +103,7 @@ class AttributeProcessor:
         limit = max(0, self.settings.attribute_max_tracks_per_window)
         return {ev.track_id for ev in candidates[:limit]}
 
-    def run(self, video_filename: str, manual: bool = False) -> int:
+    def run(self, video_filename: str, manual: bool = False, yield_cb=None) -> int:
         """
         Process all TrackEvents for a video:
           1. For each unique track_id, find the event with a best_crop_path
@@ -162,6 +162,10 @@ class AttributeProcessor:
         already_attributed: set = set()
 
         for entry_event in entry_events:
+            # Yield semaphore to higher-priority Ask queries between tracks
+            if yield_cb is not None:
+                yield_cb()
+
             track_id = entry_event.track_id
             object_class = entry_event.object_class
             crop_path = entry_event.best_crop_path

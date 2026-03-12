@@ -274,7 +274,7 @@ def write_activity_snapshot(track, window_key: str, wall_time: datetime, db):
         except Exception: pass
 
 
-def run_activity_captions_for_window(video_filename: str, db) -> int:
+def run_activity_captions_for_window(video_filename: str, db, yield_cb=None) -> int:
     """
     Post-window: minicpm-v caption for every entry TrackEvent that has a crop.
 
@@ -310,6 +310,10 @@ def run_activity_captions_for_window(video_filename: str, db) -> int:
     )
     captioned = 0
     for ev in events:
+        # Yield semaphore to higher-priority Ask queries between tracks
+        if yield_cb is not None:
+            yield_cb()
+
         # Enforce total budget — stop early if we're over time
         if _time.monotonic() - t_start > BUDGET_SEC:
             logger.warning("activity_captions_budget_exceeded",

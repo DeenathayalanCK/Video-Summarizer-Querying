@@ -238,6 +238,13 @@
           >
             Ingest
           </button>
+          <button
+            onclick="showTab('logs')"
+            id="tab-logs"
+            class="px-4 py-3 text-sm font-medium text-gray-500 hover:text-white transition"
+          >
+            Logs
+          </button>
         </div>
 
         <!-- Tab panels -->
@@ -916,6 +923,52 @@
               </div>
             </div>
           </div>
+
+          <!-- LOGS TAB — Ollama call log viewer -->
+          <div id="panel-logs" class="p-6 hidden">
+            <div class="max-w-5xl mx-auto">
+              <div class="flex gap-3 mb-4 items-center">
+                <h2
+                  class="text-sm font-semibold text-gray-300 flex items-center gap-2"
+                >
+                  <i data-lucide="activity" class="w-4 h-4 text-indigo-400"></i>
+                  Ollama Call Log
+                </h2>
+                <div class="flex gap-2 ml-auto">
+                  <select
+                    id="log-filter-type"
+                    class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="">All types</option>
+                    <option value="ask">ask</option>
+                    <option value="summary">summary</option>
+                    <option value="attribute">attribute</option>
+                    <option value="embed">embed</option>
+                  </select>
+                  <select
+                    id="log-n"
+                    class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="50">Last 50</option>
+                    <option value="100" selected>Last 100</option>
+                    <option value="250">Last 250</option>
+                    <option value="500">Last 500</option>
+                  </select>
+                  <button
+                    onclick="loadOllamaLog()"
+                    class="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg text-xs font-medium transition"
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+              <div
+                id="log-stats"
+                class="flex gap-3 flex-wrap mb-3 text-xs text-gray-500"
+              ></div>
+              <div id="log-results"></div>
+            </div>
+          </div>
         </div>
       </main>
     </div>
@@ -983,6 +1036,7 @@
           "detections",
           "temporal",
           "ingest",
+          "logs",
         ].forEach((t) => {
           document.getElementById(`panel-${t}`).classList.add("hidden");
           const tab = document.getElementById(`tab-${t}`);
@@ -993,6 +1047,7 @@
         const activeTab = document.getElementById(`tab-${name}`);
         activeTab.classList.add("tab-active");
         activeTab.classList.remove("text-gray-500");
+        if (name === "logs") loadOllamaLog();
       }
 
       // ── Init ───────────────────────────────────────────────────────────────────────
@@ -1496,7 +1551,7 @@
           }
 
           // Separate exact (>=51%) from similar (<51%)
-          const THRESHOLD = 0.51;
+          const THRESHOLD = 0.7;
           // Attribute keyword matches are always treated as "exact" regardless
           // of semantic distance — if "man" matched "male" via synonym, show it first.
           const isExact = (r) =>
@@ -1516,6 +1571,7 @@
           let html = "";
 
           if (hasExact) {
+            html += `<p class="text-xs text-gray-500 mb-3">🎯 Top matches <span class="text-green-500">≥70% similarity</span>:</p>`;
             html += buildResultSections(exactEv, exactObj, exactCap, false);
           }
 
@@ -1524,11 +1580,11 @@
                           <div class="flex-1 h-px bg-gray-800"></div>
                           <div class="flex items-center gap-2 text-xs text-yellow-500 px-3 py-1.5 rounded-full bg-yellow-500/10 border border-yellow-500/20">
                             <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
-                            No exact match found for <strong>"${q}"</strong>
+                            No strong match (≥70%) found for <strong>"${q}"</strong>
                           </div>
                           <div class="flex-1 h-px bg-gray-800"></div>
                         </div>`;
-            html += `<p class="text-xs text-gray-600 mb-3">Similar results:</p>`;
+            html += `<p class="text-xs text-gray-600 mb-3">🔍 Related results (below 70%):</p>`;
             html += buildResultSections(
               similarEv,
               similarObj,
@@ -1538,7 +1594,7 @@
           } else if (hasExact && hasSimilar) {
             html += `<div class="mt-5 mb-3 flex items-center gap-2">
                           <div class="h-px flex-1 bg-gray-800"></div>
-                          <span class="text-xs text-gray-600 px-2">Similar results</span>
+                          <span class="text-xs text-gray-600 px-2">🔍 Related results (below 70%)</span>
                           <div class="h-px flex-1 bg-gray-800"></div>
                         </div>`;
             html += buildResultSections(
@@ -1693,6 +1749,14 @@
               "</div>"
             : "";
           attrHtml = visHtml + pillsHtml;
+          // Show raw moondream description if available
+          const rawDesc = a.moondream_raw;
+          if (rawDesc && rawDesc.trim()) {
+            const safeDesc = rawDesc
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+            attrHtml += `<div class="text-xs text-gray-500 italic mt-1.5 leading-snug">📝 ${safeDesc}</div>`;
+          }
         }
 
         // Build proof section (rag_text shown on expand)
@@ -1838,6 +1902,9 @@
         const video = document.getElementById("ask-video-filter").value;
         const el = document.getElementById("ask-results");
 
+        // Start wall-clock timer
+        const t0 = Date.now();
+
         // Show streaming answer box immediately
         el.innerHTML = `
           <div class="glass rounded-xl p-5 mb-4 fade-in" id="ask-answer-box">
@@ -1849,6 +1916,7 @@
             <div id="ask-answer-text" class="prose-surveillance text-sm text-gray-200 leading-relaxed whitespace-pre-wrap"></div>
           </div>
           <div id="ask-sources-area"></div>
+          <div id="ask-context-area"></div>
         `;
         lucide.createIcons();
 
@@ -1901,14 +1969,30 @@
 
               if (msg.done) {
                 isFastPath = msg.fast_path || false;
+                const wallMs = Date.now() - t0;
+                const llmMs = msg.elapsed_ms || 0;
                 const badge = document.getElementById("ask-status-badge");
-                if (isFastPath) {
-                  badge.textContent = "⚡ instant";
+                if (msg.error) {
+                  // Pipeline busy or other error — show clear status
+                  badge.textContent =
+                    msg.error === "busy" ? "⏳ pipeline busy" : "⚠ error";
+                  badge.className =
+                    "ml-auto text-xs text-amber-400 font-medium";
+                  // Render the error message in answer area
+                  const answerEl = document.getElementById("ask-answer-text");
+                  const errMsg = msg.error_message || fullAnswer;
+                  answerEl.innerHTML =
+                    `<span class="text-amber-300">${errMsg}</span>` +
+                    (msg.error === "busy"
+                      ? `<div class="mt-2 text-xs text-gray-500">💡 Tip: wait a minute while video processing finishes, or run <code>docker compose restart api</code> to skip the queue.</div>`
+                      : "");
+                } else if (isFastPath) {
+                  badge.textContent = `⚡ instant (${(wallMs / 1000).toFixed(2)}s)`;
                   badge.className =
                     "ml-auto text-xs text-emerald-400 font-medium";
                 } else {
-                  badge.textContent = "✓ done";
-                  badge.className = "ml-auto text-xs text-gray-500";
+                  badge.textContent = `✓ done — ⏱ ${(wallMs / 1000).toFixed(1)}s (LLM ${(llmMs / 1000).toFixed(1)}s)`;
+                  badge.className = "ml-auto text-xs text-gray-400";
                 }
 
                 // Render markdown now that answer is complete
@@ -1924,6 +2008,35 @@
                     <div class="grid gap-3">
                       ${sources.map((r) => resultCard(r)).join("")}
                     </div>`;
+                  lucide.createIcons();
+                }
+
+                // ── Context debug panel (collapsible) ──────────────────────
+                const ctx = msg.context || "";
+                const sections = msg.context_sections || {};
+                if (ctx) {
+                  const secLines = Object.entries(sections)
+                    .filter(([k]) => k !== "total_chars")
+                    .map(
+                      ([k, v]) =>
+                        `<span class="inline-block px-2 py-0.5 rounded bg-gray-800 text-gray-400 text-xs mr-1 mb-1">${k}: ${v}ch</span>`,
+                    )
+                    .join("");
+                  const totalChars = sections.total_chars || ctx.length;
+                  const estTokens = Math.round(totalChars / 3.5);
+                  document.getElementById("ask-context-area").innerHTML = `
+                    <details class="mt-4 glass rounded-xl border border-gray-800">
+                      <summary class="p-4 cursor-pointer text-xs text-gray-500 hover:text-gray-300 flex items-center gap-2 select-none">
+                        <i data-lucide="code-2" class="w-3.5 h-3.5"></i>
+                        🔍 Debug: Context sent to LLM
+                        <span class="ml-2 text-gray-600">${estTokens} est. tokens · ${totalChars} chars</span>
+                        <span class="ml-auto text-gray-700">▾ expand</span>
+                      </summary>
+                      <div class="px-4 pb-4">
+                        <div class="flex flex-wrap gap-1 mb-3">${secLines}</div>
+                        <pre class="text-xs text-gray-400 bg-gray-950 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-96 overflow-y-auto">${ctx.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>
+                      </div>
+                    </details>`;
                   lucide.createIcons();
                 }
               }
@@ -2293,7 +2406,8 @@
           for (let i = 0; i < 300; i++) {
             const job = await apiFetch(`/summarize/jobs/${jobId}`);
             if (job.status === "completed") {
-              if (!job.result) throw new Error("Summary job completed without result");
+              if (!job.result)
+                throw new Error("Summary job completed without result");
               return job.result;
             }
             if (job.status === "failed") {
@@ -3135,6 +3249,113 @@
         } catch (e) {
           el.textContent = `Error: ${e.message}`;
           el.className = "mt-3 text-sm text-red-400";
+        }
+      }
+
+      // ── Ollama Log viewer ──────────────────────────────────────────────────────────
+      async function loadOllamaLog() {
+        const n = document.getElementById("log-n")?.value || 100;
+        const filterType =
+          document.getElementById("log-filter-type")?.value || "";
+        const el = document.getElementById("log-results");
+        const statsEl = document.getElementById("log-stats");
+        if (!el) return;
+        el.innerHTML = spinner();
+        try {
+          const data = await apiFetch(`/ollama-log?n=${n}`);
+          let entries = data.entries || [];
+          if (filterType)
+            entries = entries.filter((e) => e.call_type === filterType);
+
+          if (!entries.length) {
+            el.innerHTML = `<div class="text-sm text-gray-600 text-center py-12">No Ollama calls logged yet.<br><span class="text-xs">Calls are logged to /data/logs/ollama_calls.jsonl</span></div>`;
+            return;
+          }
+
+          // Stats bar
+          const byType = {};
+          const byStatus = { ok: 0, timeout: 0, error: 0 };
+          let totalMs = 0;
+          for (const e of entries) {
+            byType[e.call_type] = (byType[e.call_type] || 0) + 1;
+            byStatus[e.status] = (byStatus[e.status] || 0) + 1;
+            totalMs += e.elapsed_ms || 0;
+          }
+          const avgMs = entries.length
+            ? Math.round(totalMs / entries.length)
+            : 0;
+          const typeHtml = Object.entries(byType)
+            .map(
+              ([t, c]) =>
+                `<span class="px-2 py-0.5 bg-indigo-500/10 border border-indigo-500/20 rounded text-indigo-400">${t}: ${c}</span>`,
+            )
+            .join("");
+          statsEl.innerHTML = `
+            ${typeHtml}
+            <span class="px-2 py-0.5 bg-green-500/10 border border-green-500/20 rounded text-green-400">ok: ${byStatus.ok}</span>
+            ${byStatus.timeout ? `<span class="px-2 py-0.5 bg-yellow-500/10 border border-yellow-500/20 rounded text-yellow-400">timeout: ${byStatus.timeout}</span>` : ""}
+            ${byStatus.error ? `<span class="px-2 py-0.5 bg-red-500/10 border border-red-500/20 rounded text-red-400">error: ${byStatus.error}</span>` : ""}
+            <span class="text-gray-600">avg ${(avgMs / 1000).toFixed(1)}s</span>
+            <span class="text-gray-700">${entries.length} entries shown</span>
+          `;
+
+          // Table
+          const typeColor = {
+            ask: "text-indigo-400",
+            summary: "text-purple-400",
+            attribute: "text-yellow-400",
+            embed: "text-cyan-400",
+            activity: "text-orange-400",
+          };
+          const rows = entries
+            .map((e) => {
+              const tc = typeColor[e.call_type] || "text-gray-400";
+              const elapsed = ((e.elapsed_ms || 0) / 1000).toFixed(1);
+              const statusColor =
+                e.status === "ok"
+                  ? "text-green-400"
+                  : e.status === "timeout"
+                    ? "text-yellow-400"
+                    : "text-red-400";
+              const prompt = (e.prompt || "")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+              const response = (e.response || "")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+              const ts = (e.ts || "").replace("T", " ").replace("Z", "");
+              return `<div class="glass rounded-lg p-3 mb-2 text-xs">
+              <div class="flex items-center gap-3 mb-2">
+                <span class="${tc} font-semibold w-20 shrink-0">${e.call_type}</span>
+                <span class="text-gray-500">${e.model || ""}</span>
+                <span class="${statusColor} font-medium">${e.status}</span>
+                <span class="text-gray-400">⏱ ${elapsed}s</span>
+                <span class="text-gray-700 ml-auto">${ts}</span>
+              </div>
+              ${e.error ? `<div class="text-red-400 mb-1">⚠ ${e.error}</div>` : ""}
+              <details>
+                <summary class="text-gray-600 cursor-pointer hover:text-gray-400 select-none">▸ prompt / response</summary>
+                <div class="mt-2 space-y-2">
+                  <div>
+                    <span class="text-gray-600 font-medium">Prompt:</span>
+                    <pre class="mt-1 text-gray-400 bg-gray-950 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-32 overflow-y-auto">${prompt}</pre>
+                  </div>
+                  ${
+                    response
+                      ? `<div>
+                    <span class="text-gray-600 font-medium">Response:</span>
+                    <pre class="mt-1 text-gray-300 bg-gray-950 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-32 overflow-y-auto">${response}</pre>
+                  </div>`
+                      : ""
+                  }
+                </div>
+              </details>
+            </div>`;
+            })
+            .join("");
+          el.innerHTML = rows;
+        } catch (e) {
+          el.innerHTML = errorBox(e.message);
         }
       }
 

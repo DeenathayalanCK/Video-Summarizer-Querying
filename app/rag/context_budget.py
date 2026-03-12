@@ -10,13 +10,14 @@ Two Ollama lanes (ask + pipeline) at 2048 each = 4.18 GB total — safe on 24 GB
 Budget allocation (out of 2048 total context):
   Fixed overhead (MEASURED: system_prompt=781t + user_template=153t + margin): ~950 tokens
   Remaining for content: 1098 tokens, allocated as:
-    Focused track context : 400 (most relevant — always include first)
-    Video summaries       : 150
-    Memory graph          : 150
-    Behaviour analysis    : 100
-    Timeline              : 150
-    Raw events            : 100
-    Safety margin         :  48
+    Focused track context : 350 (most relevant — always include first)
+    Video summaries       : 100
+    Memory graph          : 100
+    Behaviour analysis    :  80
+    Timeline              : 120
+    Raw events            :  80
+    Scene captions        : 200 (moondream descriptions + batch captions)
+    Safety margin         :  68
 
 Rough token estimate: 1 token ~= 3.5 chars (conservative for English surveillance text)
 """
@@ -34,12 +35,14 @@ OLLAMA_NUM_CTX = 2048
 
 # Budget per section in tokens (must sum to < OLLAMA_NUM_CTX - overhead)
 _BUDGETS = {
-    "summary": 150,   # per-window narrative summaries
-    "focused": 400,
-    "memory": 150,
-    "behaviour": 100,
-    "timeline": 150,
-    "raw_events": 100,
+    "focused":    350,   # primary: temporal track context
+    "summary":    100,   # per-window narrative summaries
+    "memory":     100,   # knowledge graph nodes
+    "behaviour":   80,   # temporal behaviour labels
+    "timeline":   120,   # per-second event spine
+    "raw_events":  80,   # raw entry/exit/dwell rows
+    "captions":   200,   # scene captions (batch) + moondream descriptions (live)
+    # sum=1030, + 950 overhead + 68 margin = 2048 ✓
 }
 
 # Fixed overhead estimate (system prompt + template text + question)
@@ -100,6 +103,7 @@ def build_budgeted_context(
     behaviour: str = "",
     timeline: str = "",
     raw_events: str = "",
+    captions: str = "",
 ) -> str:
     """
     Assemble all context sections respecting per-section token budgets.
@@ -114,19 +118,18 @@ def build_budgeted_context(
     if summary:
         trimmed = trim_to_budget(summary, _BUDGETS["summary"], "video_summary")
         sections.append(trimmed)
-
+    if captions:
+        trimmed = trim_to_budget(captions, _BUDGETS["captions"], "scene_captions")
+        sections.append(trimmed)
     if memory:
         trimmed = trim_to_budget(memory, _BUDGETS["memory"], "memory_graph")
         sections.append(trimmed)
-
     if behaviour:
         trimmed = trim_to_budget(behaviour, _BUDGETS["behaviour"], "behaviour_analysis")
         sections.append(trimmed)
-
     if timeline:
         trimmed = trim_to_budget(timeline, _BUDGETS["timeline"], "video_timeline")
         sections.append(trimmed)
-
     if raw_events:
         trimmed = trim_to_budget(raw_events, _BUDGETS["raw_events"], "raw_events")
         sections.append(trimmed)

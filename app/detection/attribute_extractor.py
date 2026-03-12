@@ -19,6 +19,8 @@ import cv2
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional
+from app.core.ollama_logger import OllamaCallTimer
+from typing import Optional
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -65,6 +67,10 @@ class PersonAttributes:
     # Tier-1 CV fields — always populated from color histogram, no LLM needed
     clothing_top_color: str = "unknown"
     clothing_bottom_color: str = "unknown"
+    # Raw text returned by moondream/minicpm-v before JSON parsing.
+    # Stored as-is so the frontend can display it as a human-readable description.
+    # Empty string when LLM timed out or was skipped.
+    moondream_raw: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -77,6 +83,7 @@ class PersonAttributes:
             "visible_text": self.visible_text,
             "clothing_top_color": self.clothing_top_color,
             "clothing_bottom_color": self.clothing_bottom_color,
+            "moondream_raw": self.moondream_raw,
         }
 
     @property
@@ -153,17 +160,7 @@ class BaseAttributeExtractor:
             },
         }
 
-        # Attribute extraction uses small crops with num_predict=150, so a 90s
-        # timeout is more than enough.  The full caption_timeout_seconds (300s)
-        # is too long — holding an inactive DB connection for 300 s causes the
-        # PostgreSQL server to close it, and the subsequent flush() fails with
-        # OperationalError, aborting all remaining tracks in the window.
-        # Cap read timeout at 90s; use separate 5s connect timeout so a
-        # cold/unreachable Ollama fails fast rather than blocking the whole pipeline.
-        # Tier-1 CV gives color+carrying for free. LLM (tier-2) is optional enrichment
-        # for gender/age/clothing type. With semaphore fix, 30s is sufficient — the
-        # thread won't waste its timeout waiting for another thread's Ollama call.
-        attr_timeout = 120  # 30s — if it doesn't finish in 30s, tier-1 data is enough
+        attr_timeout = 120
 
         # Skip entirely if no multimodal model configured
         if not self.model or not self.model.strip():
@@ -171,13 +168,20 @@ class BaseAttributeExtractor:
             return None
 
         try:
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json=payload,
-                timeout=(5, attr_timeout),   # (connect_timeout, read_timeout)
-            )
-            response.raise_for_status()
-            return response.json().get("response", "")
+            with OllamaCallTimer(
+                call_type="attribute",
+                model=self.model,
+                prompt=prompt[:800],
+            ) as t:
+                response = requests.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    timeout=(5, attr_timeout),
+                )
+                response.raise_for_status()
+                result = response.json().get("response", "")
+                t.response = result
+            return result
         except requests.exceptions.Timeout:
             self.logger.warning(
                 "attribute_extraction_timeout",
@@ -486,11 +490,13 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
 
         # ── Tier-2: LLM extraction (optional) ───────────────────────────────
         llm_attrs: dict = {}
+        raw_text: str = ""
         if allow_llm and self.model and self.model.strip():
             image_b64 = self._load_and_encode_crop(crop_path)
             if image_b64 is not None:
                 raw = self._call_vision_model(image_b64, PERSON_ATTRIBUTE_PROMPT)
                 if raw is not None:
+                    raw_text = raw
                     data = self._extract_json(raw)
                     if data is None:
                         # JSON failed — try prose fallback (moondream2 style)
@@ -526,6 +532,7 @@ class PersonAttributeExtractor(BaseAttributeExtractor):
             visible_text=str(llm_attrs.get("visible_text", "none")).strip(),
             clothing_top_color=top_color,
             clothing_bottom_color=bottom_color,
+            moondream_raw=raw_text.strip(),
         )
 
         self.logger.info(

@@ -247,6 +247,7 @@ def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
     def generate():
         # Fast-path: no Ollama call needed — stream immediately without sem
         from app.rag.fast_path import try_fast_path
+        from app.vision.window_manager import WindowManager, OllamaLaneBusyError
         import json as _json
         fast = try_fast_path(db, body.question, body.video_filename)
         if fast.get("answered"):
@@ -256,17 +257,25 @@ def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
 
         # LLM path: Ask traffic uses its own Ollama lane so background window
         # post-processing is queued independently instead of being dropped.
-        from app.vision.window_manager import WindowManager
-
+        # OllamaLaneBusyError is raised if pipeline holds the lock past the timeout.
         wm = WindowManager.get_instance()
-        with wm.ask_ollama_ctx():
-            yield from engine.stream_ask(
-                question=body.question,
-                video_filename=body.video_filename,
-                camera_id=body.camera_id,
-                min_second=body.min_second,
-                max_second=body.max_second,
-            )
+        try:
+            with wm.ask_ollama_ctx():
+                yield from engine.stream_ask(
+                    question=body.question,
+                    video_filename=body.video_filename,
+                    camera_id=body.camera_id,
+                    min_second=body.min_second,
+                    max_second=body.max_second,
+                )
+        except OllamaLaneBusyError as e:
+            msg = str(e)
+            yield f"data: {_json.dumps({'token': msg})}\n\n"
+            yield f"data: {_json.dumps({'done': True, 'sources': [], 'error': 'busy', 'error_message': msg})}\n\n"
+        except Exception as e:
+            msg = f"Ask failed: {type(e).__name__}: {e}"
+            yield f"data: {_json.dumps({'token': msg})}\n\n"
+            yield f"data: {_json.dumps({'done': True, 'sources': [], 'error': 'exception'})}\n\n" 
 
     return StreamingResponse(
         generate(),
@@ -1303,4 +1312,22 @@ def get_objects_in_frame(
         "video_filename": video_filename,
         "count": len(results),
         "tracks": results,
+    }
+
+
+# ── Ollama call log viewer ─────────────────────────────────────────────────────
+
+@router.get("/ollama-log")
+def get_ollama_log(n: int = Query(100, ge=1, le=2000)):
+    """
+    Return the last N Ollama call log entries, newest first.
+    Each entry: ts, call_type, model, prompt (truncated), response (truncated),
+                elapsed_ms, status, error.
+    View at GET /api/v1/ollama-log?n=100
+    """
+    from app.core.ollama_logger import read_recent_entries
+    entries = read_recent_entries(n)
+    return {
+        "count": len(entries),
+        "entries": entries,
     }

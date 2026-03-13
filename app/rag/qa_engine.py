@@ -45,6 +45,8 @@ from app.prompts.qa_prompt import (
     QA_USER_TEMPLATE,
     QA_DETECTION_SYSTEM_PROMPT,
     QA_DETECTION_USER_TEMPLATE,
+    FAST_PATH_CURATE_SYSTEM,
+    FAST_PATH_CURATE_TEMPLATE,
 )
 
 _QA_MAX_EVENTS = 150
@@ -558,9 +560,72 @@ class QAEngine:
         fast = try_fast_path(self.db, question, video_filename)
         if fast.get("answered"):
             self.logger.info("qa_stream_fast_path", type=fast.get("fast_path_type"))
-            yield _sse({"token": fast["answer"]})
-            yield _sse({"done": True, "sources": fast.get("sources", []),
-                        "fast_path": True, "fast_path_type": fast.get("fast_path_type")})
+            raw_answer  = fast["answer"]
+            raw_sources = fast.get("sources", [])
+            fp_type     = fast.get("fast_path_type", "db")
+
+            # ── Curate: send raw DB facts + question to LLM ──────────────────
+            # The prompt is tiny (~200 tokens) so this is fast (~3-8s).
+            curate_prompt = FAST_PATH_CURATE_TEMPLATE.format(
+                raw_facts=raw_answer,
+                question=question,
+            )
+            curated_tokens = []
+            t_curate_start = _time.monotonic()
+            try:
+                with OllamaCallTimer(
+                    call_type="ask",
+                    model=self.model,
+                    prompt=curate_prompt[:800],
+                ) as _ct:
+                    resp = requests.post(
+                        f"{self.settings.ollama_host}/api/generate",
+                        json={
+                            "model": self.model,
+                            "system": FAST_PATH_CURATE_SYSTEM,
+                            "prompt": curate_prompt,
+                            "stream": True,
+                            "options": {"num_ctx": 1024, "num_predict": 150},
+                        },
+                        stream=True,
+                        timeout=(10, 60),
+                    )
+                    resp.raise_for_status()
+                    import json as _jfp
+                    for line in resp.iter_lines():
+                        if not line:
+                            continue
+                        try:
+                            chunk = _jfp.loads(line)
+                        except Exception:
+                            continue
+                        token = chunk.get("response", "")
+                        if token:
+                            curated_tokens.append(token)
+                            yield _sse({"token": token})
+                        if chunk.get("done"):
+                            break
+                    _ct.response = "".join(curated_tokens)[:500]
+            except Exception as _fe:
+                self.logger.warning("fast_path_curate_failed", error=str(_fe))
+                # Fallback: stream the raw answer directly
+                yield _sse({"token": raw_answer})
+
+            curate_elapsed_ms = (_time.monotonic() - t_curate_start) * 1000
+
+            # ── Done: include raw DB data as db_evidence for the UI ───────────
+            yield _sse({
+                "done":           True,
+                "sources":        raw_sources,
+                "fast_path":      True,
+                "fast_path_type": fp_type,
+                "db_evidence": {
+                    "raw_answer": raw_answer,
+                    "fast_path_type": fp_type,
+                    "sources": raw_sources,
+                },
+                "elapsed_ms":     round(curate_elapsed_ms),
+            })
             return
 
         # ── Caption path (non-detection videos) ───────────────────────────────

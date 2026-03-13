@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from app.core.config import get_settings
 from app.storage.models import Base
+from app.storage import eval_models as _eval_models  # registers EvalCase/EvalRun with Base
 
 settings = get_settings()
 

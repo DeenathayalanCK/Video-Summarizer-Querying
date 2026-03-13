@@ -308,21 +308,26 @@ def get_live_face(person_label: str, db: Session = Depends(get_db)):
         return {"person_label": person_label, "face_detected": False,
                 "error": "identity_not_found"}
 
-    # Find most recent entry event with face_detected=true
-    # We query all entry events and filter Python-side to avoid JSONB operator issues
+    # Find most recent entry event with face_detected=true.
+    # Filter by person_label and face_detected in the DB query to avoid
+    # loading 200 rows and filtering in Python (connection held too long).
+    from sqlalchemy import cast
+    from sqlalchemy.dialects.postgresql import JSONB
     recent_events = (
         db.query(TrackEvent)
         .filter(
             TrackEvent.event_type == "entry",
+            TrackEvent.attributes[("person_label")].astext == person_label,
+            TrackEvent.attributes[("face_detected")].astext == "true",
         )
         .order_by(TrackEvent.first_seen_second.desc())
-        .limit(200)
+        .limit(10)
         .all()
     )
 
     for ev in recent_events:
         attrs = ev.attributes or {}
-        if attrs.get("person_label") == person_label and attrs.get("face_detected"):
+        if attrs.get("face_detected"):
             return {
                 "person_label":    person_label,
                 "face_detected":   True,
@@ -411,26 +416,41 @@ def live_history(db: Session = Depends(get_db)):
     """
     Full live history: all known identities with their session stats.
     Used by the Live History tab main view.
+
+    FIX: replaced N+1 per-identity session queries with two bulk queries
+    (all identities + all sessions), then grouped in Python. This avoids
+    holding a DB connection while issuing one query per identity row.
     """
+    from collections import Counter, defaultdict
+
     identities = (
         db.query(PersonIdentity)
         .order_by(PersonIdentity.last_seen_at.desc())
         .all()
     )
 
+    if not identities:
+        return {"persons": [], "total": 0}
+
+    # Single bulk query for all sessions instead of one per identity
+    all_sessions = (
+        db.query(PersonSession)
+        .order_by(PersonSession.entry_time.desc())
+        .all()
+    )
+
+    # Group sessions by person_label in Python
+    sessions_by_label: dict = defaultdict(list)
+    for s in all_sessions:
+        sessions_by_label[s.person_label].append(s)
+
     result = []
     for ident in identities:
-        sessions = (
-            db.query(PersonSession)
-            .filter(PersonSession.person_label == ident.person_label)
-            .order_by(PersonSession.entry_time.desc())
-            .all()
-        )
+        sessions = sessions_by_label.get(ident.person_label, [])
         completed    = [s for s in sessions if s.duration_seconds and s.duration_seconds > 0]
         avg_dur      = (sum(s.duration_seconds for s in completed) / len(completed)
                         if completed else 0)
         states       = [s.last_state for s in sessions if s.last_state]
-        from collections import Counter
         top_state    = Counter(states).most_common(1)[0][0] if states else "unknown"
         active_sess  = next((s for s in sessions if s.is_active), None)
 

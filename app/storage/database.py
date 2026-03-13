@@ -9,10 +9,10 @@ settings = get_settings()
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
-    pool_recycle=1800,   # recycle connections every 30 min (avoids stale-conn drops)
-    pool_timeout=30,     # raise after 30 s waiting for a free connection
-    pool_size=5,
-    max_overflow=10,
+    pool_recycle=1800,    # recycle connections every 30 min (avoids stale-conn drops)
+    pool_timeout=30,      # raise after 30 s waiting for a free connection
+    pool_size=20,         # raised from 5 — supports concurrent polling + streaming
+    max_overflow=20,      # raised from 10 — burst headroom for live dashboard polls
 )
 
 SessionLocal = sessionmaker(

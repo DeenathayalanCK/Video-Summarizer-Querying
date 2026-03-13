@@ -9,6 +9,7 @@ __pycache__/
 # Data
 data/
 app/data/
+logs/
 
 # Docker
 *.log

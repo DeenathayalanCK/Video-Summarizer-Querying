@@ -303,50 +303,69 @@ def _resolve_plate(db, q: str, video_filename: Optional[str], min_second: Option
 
 
 def _resolve_count(db, q: str, video_filename: Optional[str], min_second: Optional[float] = None, max_second: Optional[float] = None) -> dict:
-    """Answer 'how many X' by counting unique track IDs."""
+    """Answer 'how many X' by counting unique track IDs.
+
+    Produces a clean natural-language answer directly in Python — no LLM needed.
+    Sets no_curate=True so qa_engine skips the Ollama curate call entirely,
+    avoiding the 25s timeout when llama3.2 is busy with pipeline attribute calls.
+    """
+    import datetime as _dt
+    _IST = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+
+    def _fmt_ist(epoch: float) -> str:
+        """Format epoch as HH:MM in IST for display."""
+        return _dt.datetime.fromtimestamp(epoch, tz=_IST).strftime("%H:%M")
+
     obj_class = _detect_class(q)
     events = _entry_events(db, video_filename, obj_class, min_second, max_second)
 
+    # IST time context for display ("between 10:30-10:40")
+    time_ctx = ""
+    if min_second is not None and max_second is not None:
+        time_ctx = f" between {_fmt_ist(min_second)}\u2013{_fmt_ist(max_second)}"
+
     if not events:
-        cls_str = obj_class or "objects"
-        time_ctx = ""
-        if min_second is not None and max_second is not None:
-            import datetime as _dt
-            ts = _dt.datetime.fromtimestamp(min_second, tz=_dt.timezone.utc).strftime("%H:%M")
-            te = _dt.datetime.fromtimestamp(max_second, tz=_dt.timezone.utc).strftime("%H:%M")
-            time_ctx = f" between {ts}–{te}"
+        cls_str = obj_class or "persons or objects"
         return {
             "answered": True,
             "answer": f"No {cls_str} were detected{time_ctx}.",
+            "no_curate": True,
             "sources": [],
         }
 
-    # Total across all matching windows/videos
     total = len(events)
-    cls_str = obj_class or "unique objects"
+    cls_str = obj_class or "people"
 
-    # Build a time-range header when a range was applied
-    time_header = ""
-    if min_second is not None and max_second is not None:
-        import datetime as _dt
-        ts = _dt.datetime.fromtimestamp(min_second, tz=_dt.timezone.utc).strftime("%H:%M")
-        te = _dt.datetime.fromtimestamp(max_second, tz=_dt.timezone.utc).strftime("%H:%M")
-        time_header = f"Between {ts}–{te}: "
-
-    # Group by video — but cap at 5 windows to keep raw_facts compact for curation
+    # Group by video window
     by_video: dict = {}
     for ev in events:
         by_video.setdefault(ev.video_filename, []).append(ev)
+    nw = len(by_video)
 
-    lines = [f"{time_header}**{total}** {cls_str}(s) detected across {len(by_video)} window(s)."]
     sources = []
-    for vf, evs in sorted(by_video.items())[:5]:   # cap: 5 windows max in raw_facts
-        lines.append(f"  {len(evs)} in `{vf}`")
+    for vf, evs in sorted(by_video.items()):
         sources.extend(_source_from_event(ev) for ev in evs[:2])
-    if len(by_video) > 5:
-        lines.append(f"  ... and {len(by_video) - 5} more window(s)")
 
-    return {"answered": True, "answer": "\n".join(lines), "sources": sources[:6]}
+    # Clean natural-language answer — no markdown, no backticks, no LLM needed
+    window_phrase = "1 window" if nw == 1 else f"{nw} windows"
+    answer = f"{total} {cls_str} were detected{time_ctx} across {window_phrase}."
+
+    # Structured raw_facts for DB Evidence panel (uses markdown, not sent to LLM)
+    t_prefix = (f"Between {_fmt_ist(min_second)}\u2013{_fmt_ist(max_second)}: "
+                if (min_second and max_second) else "")
+    raw_lines = [f"{t_prefix}**{total}** {cls_str} detected across {nw} window(s)."]
+    for vf, evs in sorted(by_video.items())[:5]:
+        raw_lines.append(f"  {len(evs)} in `{vf}`")
+    if nw > 5:
+        raw_lines.append(f"  ... and {nw - 5} more window(s)")
+
+    return {
+        "answered": True,
+        "answer": answer,               # clean NL shown to user directly
+        "raw_facts": "\n".join(raw_lines),  # structured shown in DB Evidence panel
+        "no_curate": True,              # skip Ollama — answer already ready
+        "sources": sources[:6],
+    }
 
 
 def _resolve_presence(db, q: str, video_filename: Optional[str], min_second: Optional[float] = None, max_second: Optional[float] = None) -> dict:

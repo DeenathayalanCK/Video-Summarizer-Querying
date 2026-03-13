@@ -423,9 +423,11 @@ class QAEngine:
                         "system": FAST_PATH_CURATE_SYSTEM,
                         "prompt": curate_prompt,
                         "stream": False,
+                        "priority": 0,
+                        "keep_alive": "10m",
                         "options": {"num_ctx": 512, "num_predict": 150},
                     },
-                    timeout=(10, 25),   # curate prompt is tiny; >25s means Ollama is stuck
+                    timeout=(10, min(90, self.ask_timeout_s)),   # curate: tiny prompt, 90s ceiling
                 )
                 resp.raise_for_status()
                 curated = resp.json().get("response", "").strip()
@@ -568,6 +570,8 @@ class QAEngine:
                     "system": QA_DETECTION_SYSTEM_PROMPT,
                     "prompt": prompt,
                     "stream": False,
+                    "priority": 0,
+                    "keep_alive": "10m",
                     "options": {"num_ctx": OLLAMA_NUM_CTX, "num_predict": 200},
                 },
                 timeout=(10, self.ask_timeout_s))
@@ -627,6 +631,8 @@ class QAEngine:
                     "system": QA_SYSTEM_PROMPT,
                     "prompt": prompt,
                     "stream": False,
+                    "priority": 0,
+                    "keep_alive": "10m",
                     "options": {"num_ctx": OLLAMA_NUM_CTX, "num_predict": 200},
                 },
                 timeout=(10, self.ask_timeout_s))
@@ -699,10 +705,12 @@ class QAEngine:
                                 "system": FAST_PATH_CURATE_SYSTEM,
                                 "prompt": curate_prompt,
                                 "stream": True,
+                                "priority": 0,
+                                "keep_alive": "10m",
                                 "options": {"num_ctx": 512, "num_predict": 150},
                             },
                             stream=True,
-                            timeout=(10, 25),   # curate prompt is tiny; >25s means Ollama is stuck
+                            timeout=(10, min(90, self.ask_timeout_s)),   # curate: tiny prompt, 90s ceiling
                         )
                         resp.raise_for_status()
                         import json as _jfp
@@ -834,6 +842,8 @@ class QAEngine:
                         "system": QA_DETECTION_SYSTEM_PROMPT,
                         "prompt": prompt,
                         "stream": True,
+                        "priority": 0,
+                        "keep_alive": "10m",
                         "options": {"num_ctx": OLLAMA_NUM_CTX, "num_predict": 200},
                     },
                     stream=True,

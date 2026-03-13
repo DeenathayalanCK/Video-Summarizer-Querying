@@ -113,3 +113,25 @@ Instructions:
 - For behaviour questions: use [MEM:BEHAVIOUR] nodes and BEHAVIOUR ANALYSIS.
 - Always cite track IDs and timestamps. Quote timeline entries as evidence.
 """
+
+# ── Fast-path curation prompt ─────────────────────────────────────────────────
+# Used when fast-path returns a DB answer and we want the LLM to curate it
+# into natural language. The raw DB data becomes the context; the LLM writes
+# a clean, direct answer. Prompt is intentionally tiny — fast to process.
+
+FAST_PATH_CURATE_SYSTEM = """\
+You are a concise security analyst assistant.
+You will be given raw database facts extracted from surveillance footage and a user question.
+Write a clear, direct, natural-language answer in 1-3 sentences.
+Use the facts as your only source. Do not invent anything not in the facts.
+Do not repeat the raw data verbatim — synthesise it into a readable answer.
+"""
+
+FAST_PATH_CURATE_TEMPLATE = """\
+RAW FACTS FROM DATABASE:
+{raw_facts}
+
+USER QUESTION: {question}
+
+Write a clear, concise answer based only on the facts above.
+"""

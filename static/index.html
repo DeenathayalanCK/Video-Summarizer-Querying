@@ -245,6 +245,13 @@
           >
             Logs
           </button>
+          <button
+            onclick="showTab('eval')"
+            id="tab-eval"
+            class="px-4 py-3 text-sm font-medium text-gray-500 hover:text-white transition"
+          >
+            Eval
+          </button>
         </div>
 
         <!-- Tab panels -->
@@ -925,6 +932,152 @@
           </div>
 
           <!-- LOGS TAB — Ollama call log viewer -->
+
+          <!-- ── EVAL TAB ──────────────────────────────────────────────── -->
+          <div id="panel-eval" class="p-5 hidden">
+            <!-- Sub-tabs -->
+            <div class="flex items-center gap-1 mb-5 border-b border-gray-800">
+              <button
+                onclick="evalSubTab('auto')"
+                id="eval-sub-auto"
+                class="px-4 py-2.5 text-sm font-medium border-b-2 border-indigo-500 text-white -mb-px transition"
+              >
+                📊 Auto (from logs)
+              </button>
+              <button
+                onclick="evalSubTab('manual')"
+                id="eval-sub-manual"
+                class="px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-300 -mb-px transition"
+              >
+                🎯 Manual test cases
+              </button>
+              <div class="ml-auto flex items-center gap-2 pb-1">
+                <span id="eval-status-msg" class="text-xs text-gray-600"></span>
+                <button
+                  onclick="evalRefreshAll()"
+                  class="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white text-xs transition"
+                >
+                  ↺
+                </button>
+              </div>
+            </div>
+
+            <!-- AUTO pane -->
+            <div id="eval-pane-auto">
+              <div
+                id="eval-auto-summary"
+                class="grid grid-cols-3 sm:grid-cols-6 gap-3 mb-5"
+              ></div>
+              <div class="flex items-center gap-3 mb-4 flex-wrap">
+                <label class="text-xs text-gray-500"
+                  >Last
+                  <select
+                    id="eval-log-n"
+                    onchange="evalLoadAuto()"
+                    class="ml-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                  >
+                    <option value="20">20 queries</option>
+                    <option value="50" selected>50 queries</option>
+                    <option value="100">100 queries</option>
+                    <option value="200">200 queries</option>
+                  </select>
+                </label>
+                <label
+                  class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none"
+                >
+                  <input
+                    type="checkbox"
+                    id="eval-skip-judge"
+                    class="accent-indigo-500"
+                  />
+                  Latency only (instant, no LLM judge)
+                </label>
+                <button
+                  onclick="evalLoadAuto()"
+                  id="eval-auto-run-btn"
+                  class="ml-auto px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition"
+                >
+                  ▶ Score Now
+                </button>
+              </div>
+              <div
+                id="eval-auto-table"
+                class="text-xs text-gray-600 text-center py-12"
+              >
+                Click <strong class="text-gray-400">Score Now</strong> to
+                evaluate recent queries from logs.<br />
+                <span class="text-gray-700"
+                  >No test cases needed — reads directly from
+                  ollama_calls.jsonl</span
+                >
+              </div>
+            </div>
+
+            <!-- MANUAL pane -->
+            <div id="eval-pane-manual" class="hidden">
+              <div class="flex gap-5">
+                <div class="w-72 shrink-0 flex flex-col gap-3">
+                  <button
+                    onclick="evalRunAllManual()"
+                    id="eval-run-all-btn"
+                    class="w-full px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition flex items-center justify-center gap-2"
+                  >
+                    ▶ Run All Cases
+                  </button>
+                  <div
+                    id="eval-case-list"
+                    class="flex flex-col gap-2 max-h-[60vh] overflow-y-auto"
+                  ></div>
+                  <details class="glass rounded-xl border border-gray-800">
+                    <summary
+                      class="p-3 text-xs text-gray-400 cursor-pointer hover:text-white select-none font-medium"
+                    >
+                      ＋ Add Test Case
+                    </summary>
+                    <div class="p-3 pt-0 flex flex-col gap-2">
+                      <input
+                        id="eval-new-title"
+                        placeholder="Short title (optional)"
+                        class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500"
+                      />
+                      <textarea
+                        id="eval-new-question"
+                        rows="2"
+                        placeholder="Question *"
+                        class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 resize-none"
+                      ></textarea>
+                      <textarea
+                        id="eval-new-expected"
+                        rows="2"
+                        placeholder="Expected answer / key facts *"
+                        class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 resize-none"
+                      ></textarea>
+                      <select
+                        id="eval-new-video"
+                        class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs text-gray-300 focus:outline-none focus:border-indigo-500"
+                      >
+                        <option value="">All videos</option>
+                      </select>
+                      <button
+                        onclick="evalAddCase()"
+                        class="px-3 py-1.5 rounded-lg bg-green-700 hover:bg-green-600 text-white text-xs font-medium transition"
+                      >
+                        Save
+                      </button>
+                    </div>
+                  </details>
+                </div>
+                <div class="flex-1 min-w-0" id="eval-manual-detail">
+                  <div
+                    class="glass rounded-xl p-8 text-center text-gray-600 text-sm"
+                  >
+                    Select a test case to view results.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div id="panel-logs" class="p-6 hidden">
             <div class="max-w-5xl mx-auto">
               <div class="flex gap-3 mb-4 items-center">
@@ -1037,6 +1190,7 @@
           "temporal",
           "ingest",
           "logs",
+          "eval",
         ].forEach((t) => {
           document.getElementById(`panel-${t}`).classList.add("hidden");
           const tab = document.getElementById(`tab-${t}`);
@@ -1048,6 +1202,7 @@
         activeTab.classList.add("tab-active");
         activeTab.classList.remove("text-gray-500");
         if (name === "logs") loadOllamaLog();
+        if (name === "eval") initEvalTab();
       }
 
       // ── Init ───────────────────────────────────────────────────────────────────────
@@ -1755,7 +1910,12 @@
             const safeDesc = rawDesc
               .replace(/</g, "&lt;")
               .replace(/>/g, "&gt;");
-            attrHtml += `<div class="text-xs text-gray-500 italic mt-1.5 leading-snug">📝 ${safeDesc}</div>`;
+            attrHtml += `<div class="text-xs text-gray-500 italic mt-1.5 leading-snug">
+              <span class="caption-preview" style="display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;" title="Click to expand"
+                onclick="(function(el){var f=el.parentElement.querySelector('.caption-full');f.style.display='block';el.style.display='none';})(this)">📝 ${safeDesc}</span>
+              <span class="caption-full" style="display:none;white-space:pre-wrap;cursor:pointer;"
+                onclick="(function(el){var p=el.parentElement.querySelector('.caption-preview');el.style.display='none';p.style.display='block';})(this)">📝 ${safeDesc}</span>
+            </div>`;
           }
         }
 
@@ -1911,11 +2071,12 @@
             <div class="flex items-center gap-2 mb-3">
               <i data-lucide="sparkles" class="w-4 h-4 text-indigo-400"></i>
               <span class="text-sm font-medium">Answer</span>
-              <span id="ask-status-badge" class="ml-auto text-xs text-gray-500 animate-pulse">thinking...</span>
+              <span id="ask-status-badge" class="ml-auto text-xs text-amber-400 animate-pulse">⏳ waiting for Ollama...</span>
             </div>
             <div id="ask-answer-text" class="prose-surveillance text-sm text-gray-200 leading-relaxed whitespace-pre-wrap"></div>
           </div>
           <div id="ask-sources-area"></div>
+          <div id="ask-db-evidence"></div>
           <div id="ask-context-area"></div>
         `;
         lucide.createIcons();
@@ -1961,7 +2122,27 @@
                 continue;
               }
 
+              if (msg.waiting) {
+                const badge = document.getElementById("ask-status-badge");
+                badge.textContent = "⏳ waiting for Ollama...";
+                badge.className =
+                  "ml-auto text-xs text-amber-400 animate-pulse";
+              }
+
+              if (msg.thinking) {
+                const badge = document.getElementById("ask-status-badge");
+                badge.textContent = "💭 thinking...";
+                badge.className =
+                  "ml-auto text-xs text-indigo-400 animate-pulse";
+              }
+
               if (msg.token !== undefined) {
+                if (!fullAnswer) {
+                  const badge = document.getElementById("ask-status-badge");
+                  badge.textContent = "✍ generating...";
+                  badge.className =
+                    "ml-auto text-xs text-indigo-300 animate-pulse";
+                }
                 fullAnswer += msg.token;
                 document.getElementById("ask-answer-text").textContent =
                   fullAnswer;
@@ -1987,7 +2168,7 @@
                       ? `<div class="mt-2 text-xs text-gray-500">💡 Tip: wait a minute while video processing finishes, or run <code>docker compose restart api</code> to skip the queue.</div>`
                       : "");
                 } else if (isFastPath) {
-                  badge.textContent = `⚡ instant (${(wallMs / 1000).toFixed(2)}s)`;
+                  badge.textContent = `⚡ curated (${(wallMs / 1000).toFixed(1)}s)`;
                   badge.className =
                     "ml-auto text-xs text-emerald-400 font-medium";
                 } else {
@@ -2009,6 +2190,53 @@
                       ${sources.map((r) => resultCard(r)).join("")}
                     </div>`;
                   lucide.createIcons();
+                }
+
+                // ── DB Evidence panel (fast-path only) ────────────────────
+                const dbEv = msg.db_evidence;
+                const dbEvEl = document.getElementById("ask-db-evidence");
+                if (dbEv && dbEv.raw_answer) {
+                  const typeLabel = (dbEv.fast_path_type || "db").toUpperCase();
+                  const typeColors = {
+                    plate: "text-cyan-400 border-cyan-700/40 bg-cyan-900/10",
+                    count:
+                      "text-indigo-400 border-indigo-700/40 bg-indigo-900/10",
+                    when: "text-violet-400 border-violet-700/40 bg-violet-900/10",
+                    behaviour:
+                      "text-yellow-400 border-yellow-700/40 bg-yellow-900/10",
+                    identity: "text-pink-400 border-pink-700/40 bg-pink-900/10",
+                    presence:
+                      "text-green-400 border-green-700/40 bg-green-900/10",
+                    carrying:
+                      "text-orange-400 border-orange-700/40 bg-orange-900/10",
+                  };
+                  const tcls =
+                    typeColors[dbEv.fast_path_type] ||
+                    "text-gray-400 border-gray-700/40 bg-gray-900/10";
+                  const rawLines = dbEv.raw_answer
+                    .split("\n")
+                    .filter((l) => l.trim())
+                    .map(
+                      (
+                        l,
+                      ) => `<div class="flex items-start gap-2 py-1 border-b border-gray-800/50 last:border-0">
+                      <span class="text-gray-600 mt-0.5 shrink-0">▸</span>
+                      <span class="text-xs text-gray-400 leading-relaxed font-mono">${l.replace(/\*\*/g, "").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</span>
+                    </div>`,
+                    )
+                    .join("");
+                  dbEvEl.innerHTML = `
+                    <details class="mt-3 rounded-xl border ${tcls}" open>
+                      <summary class="px-4 py-2.5 cursor-pointer flex items-center gap-2 select-none hover:opacity-80 transition">
+                        <span class="text-sm">🗃️</span>
+                        <span class="text-xs font-semibold ${tcls.split(" ")[0]}">DB Evidence</span>
+                        <span class="text-xs px-1.5 py-0.5 rounded-full bg-gray-800 border border-gray-700 text-gray-500 ml-1">${typeLabel}</span>
+                        <span class="text-xs text-gray-600 ml-auto">raw facts used to curate answer ▾</span>
+                      </summary>
+                      <div class="px-4 pb-3 pt-1">${rawLines}</div>
+                    </details>`;
+                } else {
+                  dbEvEl.innerHTML = "";
                 }
 
                 // ── Context debug panel (collapsible) ──────────────────────
@@ -2590,6 +2818,19 @@
             </div>`;
         } else if (attrs.face_detected === false && attrs.face_method) {
           html += `<div class="mt-1 text-xs text-gray-600">😶 No face detected</div>`;
+        }
+
+        if (attrs.moondream_raw && attrs.moondream_raw.trim()) {
+          const safeDesc = attrs.moondream_raw
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+          const capId = "cap-" + Math.random().toString(36).slice(2, 8);
+          html += `<div class="text-xs text-gray-500 italic mt-1.5 leading-snug">
+            <span class="caption-preview" style="display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;cursor:pointer;" title="Click to expand"
+              onclick="(function(el){var f=el.parentElement.querySelector('.caption-full');f.style.display='block';el.style.display='none';})(this)">📝 ${safeDesc}</span>
+            <span class="caption-full" style="display:none;white-space:pre-wrap;cursor:pointer;"
+              onclick="(function(el){var p=el.parentElement.querySelector('.caption-preview');el.style.display='none';p.style.display='block';})(this)">📝 ${safeDesc}</span>
+          </div>`;
         }
 
         return html;
@@ -4282,6 +4523,452 @@
               : ""
           }
         `;
+      }
+
+      // ══════════════════════════════════════════════════════════
+      // EVAL TAB JS
+      // ══════════════════════════════════════════════════════════
+      let _evalMode = "auto",
+        _evalCases = [],
+        _evalSelected = null,
+        _evalInited = false;
+
+      function evalSubTab(mode) {
+        _evalMode = mode;
+        ["auto", "manual"].forEach((m) => {
+          document
+            .getElementById("eval-pane-" + m)
+            .classList.toggle("hidden", m !== mode);
+          const b = document.getElementById("eval-sub-" + m);
+          b.classList.toggle("border-indigo-500", m === mode);
+          b.classList.toggle("text-white", m === mode);
+          b.classList.toggle("border-transparent", m !== mode);
+          b.classList.toggle("text-gray-500", m !== mode);
+        });
+        if (mode === "manual" && _evalCases.length === 0) evalLoadCases();
+      }
+
+      function _sc(v) {
+        return v == null || v < 0 ? "—" : Math.round(v * 100) + "%";
+      }
+      function _scC(v) {
+        if (v == null || v < 0) return "text-gray-600";
+        return v >= 0.8
+          ? "text-green-400"
+          : v >= 0.5
+            ? "text-yellow-400"
+            : "text-red-400";
+      }
+      function _scBg(v) {
+        if (v == null || v < 0) return "bg-gray-800/40 border-gray-700/40";
+        return v >= 0.8
+          ? "bg-green-900/25 border-green-700/30"
+          : v >= 0.5
+            ? "bg-yellow-900/25 border-yellow-700/30"
+            : "bg-red-900/25 border-red-700/30";
+      }
+      function _lat(ms) {
+        if (!ms) return '<span class="text-gray-600">—</span>';
+        const s = (ms / 1000).toFixed(1);
+        return `<span class="${ms < 2000 ? "text-green-400" : ms < 10000 ? "text-yellow-400" : "text-red-400"} font-mono">${s}s</span>`;
+      }
+
+      function _summaryGrid(agg) {
+        const defs = [
+          ["latency_score", "⚡", "Speed"],
+          ["groundedness", "⚓", "Grounded"],
+          ["hallucination", "🚫", "No Halluc."],
+          ["precision", "🎯", "Precision"],
+          ["recall", "🔁", "Recall"],
+          ["accuracy", "✓", "Accuracy"],
+        ];
+        const latCard = `<div class="glass rounded-xl p-3 border border-gray-800 flex flex-col gap-1">
+          <div class="text-xl">⏱</div><div class="text-xs text-gray-500">P50/P95</div>
+          <div class="text-sm font-mono text-gray-300">
+            ${agg.latency_p50_ms || agg.p50_ms ? ((agg.latency_p50_ms || agg.p50_ms) / 1000).toFixed(1) + "s" : "—"}
+            <span class="text-gray-700">/</span>
+            ${agg.latency_p95_ms || agg.p95_ms ? ((agg.latency_p95_ms || agg.p95_ms) / 1000).toFixed(1) + "s" : "—"}
+          </div></div>`;
+        return (
+          defs
+            .map(([k, icon, label]) => {
+              const v = agg[k];
+              return `<div class="glass rounded-xl p-3 border ${_scBg(v)} flex flex-col gap-1">
+            <div class="text-xl leading-none">${icon}</div>
+            <div class="text-xs text-gray-500">${label}</div>
+            <div class="text-xl font-bold font-mono ${_scC(v)}">${_sc(v)}</div>
+          </div>`;
+            })
+            .join("") + latCard
+        );
+      }
+
+      // ── AUTO mode ──────────────────────────────────────────────
+      async function evalLoadAuto() {
+        const n = document.getElementById("eval-log-n").value;
+        const skipJudge = document.getElementById("eval-skip-judge").checked;
+        const btn = document.getElementById("eval-auto-run-btn");
+        const status = document.getElementById("eval-status-msg");
+        btn.disabled = true;
+        btn.textContent = "⏳ Scoring…";
+        status.textContent = skipJudge
+          ? "Reading logs…"
+          : "Running LLM judge per entry…";
+        document.getElementById("eval-auto-table").innerHTML =
+          '<div class="text-xs text-gray-600 text-center py-8 animate-pulse">Scoring…</div>';
+
+        try {
+          const url = skipJudge
+            ? `/eval/logs/latency?n=${n}`
+            : `/eval/logs?n=${n}&skip_judge=false`;
+          const data = await apiFetch(url);
+          const agg = data.aggregate || {};
+          const entries = data.entries || [];
+
+          document.getElementById("eval-auto-summary").innerHTML =
+            _summaryGrid(agg);
+
+          if (!entries.length) {
+            document.getElementById("eval-auto-table").innerHTML =
+              `<div class="text-gray-600 text-center py-12">No ask queries found in logs yet.<br>
+              <span class="text-gray-700 text-xs">Use the Ask tab first, then come back to evaluate.</span></div>`;
+            status.textContent = "0 entries";
+            return;
+          }
+
+          const scoreKeys = [
+            "score_latency",
+            "score_groundedness",
+            "score_hallucination",
+            "score_precision",
+          ];
+          const scoreIcons = ["⚡", "⚓", "🚫", "🎯"];
+          const scoreLabels = ["Speed", "Grounded", "No Halluc.", "Precision"];
+
+          const rows = entries
+            .map((e) => {
+              const safeQ = (e.question || "")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+              const safeA = (e.answer || "")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+              const ts = e.ts ? new Date(e.ts).toLocaleTimeString() : "";
+              const scoreGrid = skipJudge
+                ? `<div class="text-xs text-gray-500">Latency: ${_lat(e.elapsed_ms)}</div>`
+                : `<div class="grid grid-cols-4 gap-1.5 mt-2">
+                  ${scoreKeys
+                    .map(
+                      (
+                        k,
+                        i,
+                      ) => `<div class="rounded-lg p-2 text-center border ${_scBg(e[k])}">
+                    <div class="text-sm">${scoreIcons[i]}</div>
+                    <div class="text-xs text-gray-500">${scoreLabels[i]}</div>
+                    <div class="text-base font-bold font-mono ${_scC(e[k])}">${_sc(e[k])}</div>
+                  </div>`,
+                    )
+                    .join("")}
+                </div>`;
+              const notes = e.judge_notes || {};
+              const noteHtml = Object.entries(notes)
+                .filter(([, v]) => v)
+                .map(
+                  ([k, v]) =>
+                    `<div class="text-xs"><span class="text-gray-500 capitalize">${k}:</span> <span class="text-gray-400">${v}</span></div>`,
+                )
+                .join("");
+              return `<div class="glass rounded-xl p-4 border border-gray-800 hover:border-gray-700 transition">
+              <div class="flex items-start justify-between gap-3 mb-1">
+                <div class="flex-1 min-w-0">
+                  <div class="text-xs text-gray-600 mb-0.5">${ts} · <span class="text-gray-700">${e.model || ""}</span></div>
+                  <div class="text-sm text-gray-200 font-medium">${safeQ}</div>
+                </div>
+                ${_lat(e.elapsed_ms)}
+              </div>
+              ${scoreGrid}
+              ${
+                safeA
+                  ? `<details class="mt-2"><summary class="text-xs text-gray-600 cursor-pointer hover:text-gray-400 select-none">Answer ▾</summary>
+                <div class="mt-1 text-xs text-gray-400 bg-gray-950 rounded p-2 leading-relaxed whitespace-pre-wrap">${safeA}</div></details>`
+                  : ""
+              }
+              ${noteHtml ? `<div class="mt-2 flex flex-col gap-1 border-t border-gray-800/60 pt-2">${noteHtml}</div>` : ""}
+            </div>`;
+            })
+            .join("");
+
+          document.getElementById("eval-auto-table").innerHTML =
+            `<div class="flex flex-col gap-3">${rows}</div>`;
+          status.textContent = `${entries.length} queries scored`;
+        } catch (e) {
+          document.getElementById("eval-auto-table").innerHTML =
+            `<div class="text-red-400 text-sm text-center py-8">Error: ${e.message}</div>`;
+          status.textContent = "error";
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "▶ Score Now";
+        }
+      }
+
+      // ── MANUAL mode ────────────────────────────────────────────
+      async function evalLoadCases() {
+        const [cr, sr] = await Promise.all([
+          apiFetch("/eval/cases"),
+          apiFetch("/eval/summary").catch(() => ({ per_case: [] })),
+        ]);
+        _evalCases = cr.cases || [];
+        const byId = {};
+        (sr.per_case || []).forEach((r) => {
+          byId[r.case_id] = r;
+        });
+        const el = document.getElementById("eval-case-list");
+        if (!_evalCases.length) {
+          el.innerHTML = `<div class="text-xs text-gray-600 text-center py-6">No test cases yet.<br>Add one below ↓</div>`;
+          return;
+        }
+        el.innerHTML = _evalCases
+          .map((c) => {
+            const r = byId[c.id];
+            const acc = r ? r.accuracy : null;
+            const dot = `<span class="w-2 h-2 rounded-full shrink-0 ${acc >= 0.8 ? "bg-green-400" : acc >= 0.5 ? "bg-yellow-400" : acc >= 0 ? "bg-red-400" : "bg-gray-700"}"></span>`;
+            const active =
+              _evalSelected === c.id
+                ? "border-indigo-500 bg-indigo-950/30"
+                : "border-gray-800 hover:border-gray-600";
+            return `<div onclick="evalSelectCase('${c.id}')" id="eval-card-${c.id}"
+            class="glass rounded-xl p-3 border ${active} cursor-pointer transition group">
+            <div class="flex items-start gap-2">
+              ${dot}
+              <div class="flex-1 min-w-0">
+                <div class="text-xs font-medium text-gray-200 truncate">${c.title}</div>
+                <div class="text-xs text-gray-600 truncate">${c.question}</div>
+                ${r && r.latency_ms ? `<div class="text-xs mt-0.5">${_lat(r.latency_ms)}</div>` : ""}
+              </div>
+              <button onclick="event.stopPropagation();evalDeleteCase('${c.id}')"
+                class="opacity-0 group-hover:opacity-100 text-gray-700 hover:text-red-400 text-xs px-1 transition">✕</button>
+            </div>
+          </div>`;
+          })
+          .join("");
+      }
+
+      async function evalSelectCase(id) {
+        _evalSelected = id;
+        document.querySelectorAll('[id^="eval-card-"]').forEach((el) => {
+          el.classList.remove("border-indigo-500", "bg-indigo-950/30");
+          el.classList.add("border-gray-800");
+        });
+        const card = document.getElementById("eval-card-" + id);
+        if (card) {
+          card.classList.add("border-indigo-500", "bg-indigo-950/30");
+          card.classList.remove("border-gray-800");
+        }
+
+        const detail = document.getElementById("eval-manual-detail");
+        detail.innerHTML =
+          '<div class="text-xs text-gray-600 p-8 text-center animate-pulse">Loading…</div>';
+
+        const c = _evalCases.find((x) => x.id === id);
+        if (!c) return;
+        const runsRes = await apiFetch("/eval/runs/" + id).catch(() => ({
+          runs: [],
+        }));
+        const runs = runsRes.runs || [];
+        const latest = runs[0];
+
+        const SCORE_DEFS = [
+          ["accuracy", "✓", "Accuracy"],
+          ["groundedness", "⚓", "Grounded"],
+          ["hallucination", "🚫", "No Halluc."],
+          ["latency", "⚡", "Speed"],
+          ["precision", "🎯", "Precision"],
+          ["recall", "🔁", "Recall"],
+        ];
+
+        function runBlock(run, isLatest) {
+          const s = run.scores || {};
+          const ts = run.run_at ? new Date(run.run_at).toLocaleString() : "";
+          const notes = run.judge_notes || {};
+          const noteHtml = Object.entries(notes)
+            .filter(([, v]) => v)
+            .map(
+              ([k, v]) =>
+                `<div class="text-xs"><span class="text-gray-500 capitalize font-medium">${k}:</span> <span class="text-gray-400 ml-1">${v}</span></div>`,
+            )
+            .join("");
+          const grid = SCORE_DEFS.map(
+            ([k, icon, label]) => `
+            <div class="rounded-lg p-2.5 text-center border ${_scBg(s[k])}">
+              <div class="text-base mb-0.5">${icon}</div>
+              <div class="text-xs text-gray-500">${label}</div>
+              <div class="text-lg font-bold font-mono ${_scC(s[k])}">${_sc(s[k])}</div>
+            </div>`,
+          ).join("");
+          const safeA = (run.actual_answer || "")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+          const safeCtx = (run.context_sent || "")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+          return `<div class="bg-gray-950/60 rounded-xl p-4 border border-gray-800 ${isLatest ? "" : "opacity-60"}">
+            <div class="flex items-center gap-3 mb-3">
+              <span class="text-xs text-gray-600">${ts}</span>
+              ${run.fast_path ? '<span class="text-xs px-1.5 py-0.5 rounded-full bg-emerald-900/40 border border-emerald-700/30 text-emerald-400">⚡ fast-path</span>' : ""}
+              ${run.error ? `<span class="text-xs text-red-400">⚠ ${run.error}</span>` : ""}
+              <span class="ml-auto text-xs">${_lat(run.latency_ms)}</span>
+            </div>
+            <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-4">${grid}</div>
+            ${safeA ? `<div class="bg-gray-900 rounded-lg p-3 mb-3"><div class="text-xs text-gray-500 font-medium mb-1">Actual answer</div><div class="text-sm text-gray-200 leading-relaxed">${safeA}</div></div>` : ""}
+            ${noteHtml ? `<div class="bg-gray-900 rounded-lg p-3 mb-3 flex flex-col gap-1"><div class="text-xs text-gray-500 font-medium mb-0.5">Judge reasoning</div>${noteHtml}</div>` : ""}
+            ${
+              safeCtx
+                ? `<details><summary class="text-xs text-gray-600 cursor-pointer hover:text-gray-400 select-none">🔍 Context sent to LLM</summary>
+              <pre class="mt-2 text-xs text-gray-500 bg-gray-950 rounded p-3 overflow-x-auto whitespace-pre-wrap max-h-40 overflow-y-auto">${safeCtx}</pre></details>`
+                : ""
+            }
+          </div>`;
+        }
+
+        const tags = (c.tags || [])
+          .map(
+            (t) =>
+              `<span class="text-xs px-2 py-0.5 rounded-full bg-gray-800 border border-gray-700 text-gray-400">${t}</span>`,
+          )
+          .join("");
+        detail.innerHTML = `
+          <div class="glass rounded-xl p-5 mb-4 border border-gray-800">
+            <div class="flex items-start justify-between gap-4 mb-4">
+              <div><h3 class="text-base font-semibold text-white mb-1">${c.title}</h3><div class="flex flex-wrap gap-1">${tags}</div></div>
+              <button onclick="evalRunOne('${c.id}')" id="eval-run-btn-${c.id}"
+                class="shrink-0 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition">▶ Run</button>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mb-4">
+              <div class="bg-gray-950 rounded-lg p-3"><div class="text-xs text-gray-500 mb-1 font-medium">Question</div><div class="text-sm text-gray-200">${c.question}</div></div>
+              <div class="bg-gray-950 rounded-lg p-3"><div class="text-xs text-gray-500 mb-1 font-medium">Expected</div><div class="text-sm text-gray-300">${c.expected}</div></div>
+            </div>
+            ${latest ? runBlock(latest, true) : '<div class="text-xs text-gray-600 text-center py-4">No runs yet — click ▶ Run</div>'}
+          </div>
+          ${
+            runs.length > 1
+              ? `<div class="glass rounded-xl p-4 border border-gray-800">
+            <div class="text-xs text-gray-500 font-medium mb-3">History (${runs.length} runs)</div>
+            <div class="flex flex-col gap-3">${runs
+              .slice(1)
+              .map((r) => runBlock(r, false))
+              .join("")}</div>
+          </div>`
+              : ""
+          }`;
+      }
+
+      async function evalRunOne(id) {
+        const btn = document.getElementById("eval-run-btn-" + id);
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "⏳ Running…";
+        }
+        try {
+          await apiFetch("/eval/run/" + id, { method: "POST" });
+          await evalSelectCase(id);
+          await evalLoadCases();
+        } catch (e) {
+          alert("Run failed: " + e.message);
+        } finally {
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = "▶ Run";
+          }
+        }
+      }
+
+      async function evalRunAllManual() {
+        if (!_evalCases.length) {
+          alert("No test cases yet.");
+          return;
+        }
+        const btn = document.getElementById("eval-run-all-btn");
+        btn.disabled = true;
+        for (let i = 0; i < _evalCases.length; i++) {
+          btn.textContent = `⏳ ${i + 1}/${_evalCases.length}`;
+          try {
+            await apiFetch("/eval/run/" + _evalCases[i].id, { method: "POST" });
+          } catch (e) {}
+          await evalLoadCases();
+        }
+        btn.disabled = false;
+        btn.textContent = "▶ Run All Cases";
+        if (_evalSelected) await evalSelectCase(_evalSelected);
+      }
+
+      async function evalAddCase() {
+        const q = document.getElementById("eval-new-question").value.trim();
+        const e = document.getElementById("eval-new-expected").value.trim();
+        if (!q || !e) {
+          alert("Question and Expected answer are required.");
+          return;
+        }
+        const title =
+          document.getElementById("eval-new-title").value.trim() ||
+          q.slice(0, 60);
+        const video = document.getElementById("eval-new-video").value || null;
+        await apiFetch("/eval/cases", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title,
+            question: q,
+            expected: e,
+            video_filename: video,
+            tags: [],
+          }),
+        });
+        ["eval-new-title", "eval-new-question", "eval-new-expected"].forEach(
+          (id) => {
+            document.getElementById(id).value = "";
+          },
+        );
+        await evalLoadCases();
+      }
+
+      async function evalDeleteCase(id) {
+        if (!confirm("Delete this test case and all its runs?")) return;
+        await apiFetch("/eval/cases/" + id, { method: "DELETE" });
+        if (_evalSelected === id) {
+          _evalSelected = null;
+          document.getElementById("eval-manual-detail").innerHTML =
+            '<div class="glass rounded-xl p-8 text-center text-gray-600 text-sm">Select a test case.</div>';
+        }
+        await evalLoadCases();
+      }
+
+      async function evalRefreshAll() {
+        if (_evalMode === "auto") await evalLoadAuto();
+        else {
+          await evalLoadCases();
+          if (_evalSelected) await evalSelectCase(_evalSelected);
+        }
+      }
+
+      async function initEvalTab() {
+        if (_evalInited) {
+          await evalRefreshAll();
+          return;
+        }
+        _evalInited = true;
+        try {
+          const vids = await apiFetch("/videos");
+          const sel = document.getElementById("eval-new-video");
+          (vids.videos || []).forEach((v) => {
+            const o = document.createElement("option");
+            o.value = v.filename;
+            o.textContent = v.filename;
+            sel.appendChild(o);
+          });
+        } catch (e) {}
+        // Default: latency-only, instant load
+        document.getElementById("eval-skip-judge").checked = true;
+        await evalLoadAuto();
       }
     </script>
   </body>

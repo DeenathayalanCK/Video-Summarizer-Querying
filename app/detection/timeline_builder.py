@@ -35,6 +35,23 @@ _VEHICLE_MOTION_LABEL = {
 
 
 def _fmt(seconds: float) -> str:
+    """
+    Convert a timestamp to a display string.
+    TrackEvent.first_seen_second stores a Unix epoch timestamp (float seconds).
+    We convert to IST (UTC+5:30) for display.
+    If somehow the value is small (< 86400 * 365, i.e. looks like a relative offset
+    rather than a unix timestamp) we fall back to mm:ss relative display.
+    """
+    import datetime as _dt
+    # Heuristic: unix timestamps for 2024+ are > 1.7 billion
+    if seconds > 1_000_000_000:
+        try:
+            utc = _dt.datetime(1970, 1, 1) + _dt.timedelta(seconds=seconds)
+            ist = utc + _dt.timedelta(hours=5, minutes=30)
+            return ist.strftime("%H:%M:%S")
+        except Exception:
+            pass
+    # Fallback: relative mm:ss
     m = int(seconds // 60)
     s = int(seconds % 60)
     return f"{m:02d}:{s:02d}"

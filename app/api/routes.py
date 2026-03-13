@@ -260,7 +260,9 @@ def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
         # OllamaLaneBusyError is raised if pipeline holds the lock past the timeout.
         wm = WindowManager.get_instance()
         try:
+            yield f"data: {_json.dumps({'waiting': True})}\n\n"
             with wm.ask_ollama_ctx():
+                yield f"data: {_json.dumps({'thinking': True})}\n\n"
                 yield from engine.stream_ask(
                     question=body.question,
                     video_filename=body.video_filename,
@@ -442,11 +444,13 @@ def list_videos(db: Session = Depends(get_db)):
             parts = vf.rsplit("_", 2)
             if len(parts) == 3:
                 from datetime import datetime
-                dt = datetime.strptime(parts[1] + parts[2], "%Y%m%d%H%M")
+                dt_utc = datetime.strptime(parts[1] + parts[2], "%Y%m%d%H%M")
+                from datetime import timedelta as _td
+                dt = dt_utc + _td(hours=5, minutes=30)   # UTC → IST
                 from app.core.config import get_settings as _gs
                 mins = _gs().live_window_minutes
-                end_dt = dt.replace(minute=dt.minute + mins) if dt.minute + mins < 60 else dt
-                label = f"{dt.strftime('%b %d  %H:%M')} – {(dt.minute+mins)%60:02d}"
+                end_min = (dt.minute + mins) % 60
+                label = f"{dt.strftime('%b %d  %H:%M')} – {end_min:02d}"
                 return {"display_label": label, "is_window": True,
                         "window_start": dt.isoformat()}
         except Exception:
@@ -1331,3 +1335,143 @@ def get_ollama_log(n: int = Query(100, ge=1, le=2000)):
         "count": len(entries),
         "entries": entries,
     }
+
+# ── Evaluation endpoints ───────────────────────────────────────────────────────
+
+@router.get("/eval/logs")
+def eval_from_logs(n: int = Query(50, ge=1, le=500), skip_judge: bool = Query(False)):
+    """Auto-eval: score last N ask calls from ollama_calls.jsonl."""
+    from app.eval.eval_engine import load_ask_logs, score_log_entry, aggregate
+    entries = load_ask_logs(n)
+    if not entries:
+        return {"entries": [], "aggregate": {}, "source": "logs"}
+    scored = [score_log_entry(e, skip_judge=skip_judge) for e in entries]
+    return {"entries": scored, "aggregate": aggregate(scored), "source": "logs", "n": len(scored)}
+
+
+@router.get("/eval/logs/latency")
+def eval_latency_only(n: int = Query(100, ge=1, le=1000)):
+    """Instant latency-only eval — no LLM judge."""
+    from app.eval.eval_engine import load_ask_logs, _score_latency, _extract_question
+    import statistics as _st
+    entries = load_ask_logs(n)
+    scored = []
+    for e in entries:
+        ms = e.get("elapsed_ms", 0)
+        scored.append({
+            "ts": e.get("ts",""), "model": e.get("model",""),
+            "question": _extract_question(e.get("prompt","")),
+            "answer": e.get("response",""),
+            "elapsed_ms": ms, "score_latency": _score_latency(ms),
+        })
+    lats = [s["elapsed_ms"] for s in scored if s["elapsed_ms"]]
+    agg = {}
+    if lats:
+        sl = sorted(lats)
+        agg = {
+            "latency_score": round(sum(_score_latency(x) for x in lats)/len(lats), 3),
+            "latency_p50_ms": sl[len(sl)//2],
+            "latency_p95_ms": sl[int(len(sl)*0.95)],
+            "latency_mean_ms": round(sum(lats)/len(lats), 1),
+            "n": len(scored),
+        }
+    return {"entries": scored, "aggregate": agg}
+
+
+@router.get("/eval/cases")
+def list_eval_cases(db: Session = Depends(get_db)):
+    from app.storage.eval_models import EvalCase
+    cases = db.query(EvalCase).order_by(EvalCase.created_at.desc()).all()
+    return {"cases": [{"id": str(c.id), "title": c.title, "question": c.question,
+        "expected": c.expected, "video_filename": c.video_filename, "tags": c.tags or [],
+        "created_at": c.created_at.isoformat() if c.created_at else None} for c in cases]}
+
+
+@router.post("/eval/cases")
+def create_eval_case(body: dict, db: Session = Depends(get_db)):
+    from app.storage.eval_models import EvalCase
+    case = EvalCase(title=body.get("title", body["question"][:60]),
+        question=body["question"], expected=body["expected"],
+        video_filename=body.get("video_filename") or None, tags=body.get("tags",[]))
+    db.add(case); db.commit(); db.refresh(case)
+    return {"id": str(case.id), "title": case.title}
+
+
+@router.delete("/eval/cases/{case_id}")
+def delete_eval_case(case_id: str, db: Session = Depends(get_db)):
+    from app.storage.eval_models import EvalCase, EvalRun
+    import uuid as _uuid
+    db.query(EvalRun).filter(EvalRun.case_id == _uuid.UUID(case_id)).delete()
+    db.query(EvalCase).filter(EvalCase.id == _uuid.UUID(case_id)).delete()
+    db.commit()
+    return {"deleted": case_id}
+
+
+@router.post("/eval/run/{case_id}")
+def run_eval_case(case_id: str, skip_judge: bool = Query(False), db: Session = Depends(get_db)):
+    import uuid as _uuid
+    from app.storage.eval_models import EvalRun
+    from app.eval.eval_engine import run_case
+    result = run_case(db, _uuid.UUID(case_id), skip_judge=skip_judge)
+    run = EvalRun(
+        case_id=_uuid.UUID(result["case_id"]),
+        actual_answer=result["actual_answer"], context_sent=result.get("context_sent",""),
+        sources=result.get("sources",[]), fast_path=result.get("fast_path",False),
+        latency_ms=result.get("latency_ms"), error=result.get("error"),
+        score_accuracy=result["score_accuracy"], score_groundedness=result["score_groundedness"],
+        score_hallucination=result["score_hallucination"], score_latency=result["score_latency"],
+        score_precision=result.get("score_precision",-1), score_recall=result.get("score_recall",-1),
+        judge_notes=result.get("judge_notes",{}), model_name=result.get("model_name"),
+    )
+    db.add(run); db.commit(); db.refresh(run)
+    return {"run_id": str(run.id), "case_id": case_id, "actual_answer": run.actual_answer,
+        "latency_ms": run.latency_ms, "error": run.error, "fast_path": run.fast_path,
+        "scores": {"accuracy": run.score_accuracy, "groundedness": run.score_groundedness,
+            "hallucination": run.score_hallucination, "latency": run.score_latency,
+            "precision": run.score_precision, "recall": run.score_recall},
+        "judge_notes": run.judge_notes}
+
+
+@router.get("/eval/runs/{case_id}")
+def get_eval_runs(case_id: str, db: Session = Depends(get_db)):
+    import uuid as _uuid
+    from app.storage.eval_models import EvalRun
+    runs = db.query(EvalRun).filter(EvalRun.case_id == _uuid.UUID(case_id)).order_by(EvalRun.run_at.desc()).all()
+    return {"runs": [{"id": str(r.id), "actual_answer": r.actual_answer,
+        "latency_ms": r.latency_ms, "error": r.error, "fast_path": r.fast_path,
+        "scores": {"accuracy": r.score_accuracy, "groundedness": r.score_groundedness,
+            "hallucination": r.score_hallucination, "latency": r.score_latency,
+            "precision": r.score_precision, "recall": r.score_recall},
+        "judge_notes": r.judge_notes or {}, "model_name": r.model_name,
+        "context_sent": r.context_sent or "",
+        "run_at": r.run_at.isoformat() if r.run_at else None} for r in runs]}
+
+
+@router.get("/eval/summary")
+def eval_summary(db: Session = Depends(get_db)):
+    from app.storage.eval_models import EvalCase, EvalRun
+    import statistics as _st
+    cases = db.query(EvalCase).all()
+    runs = [db.query(EvalRun).filter(EvalRun.case_id==c.id).order_by(EvalRun.run_at.desc()).first() for c in cases]
+    runs = [r for r in runs if r]
+    def _mean(vals):
+        v=[x for x in vals if x is not None and x>=0]
+        return round(_st.mean(v),3) if v else None
+    lats=[r.latency_ms for r in runs if r.latency_ms]
+    def _pct(v,p): sv=sorted(v); return round(sv[int(len(sv)*p/100)],1) if sv else None
+    return {"total_cases":len(cases),"runs_available":len(runs),
+        "metrics":{"accuracy":_mean([r.score_accuracy for r in runs]),
+            "groundedness":_mean([r.score_groundedness for r in runs]),
+            "hallucination":_mean([r.score_hallucination for r in runs]),
+            "latency_score":_mean([r.score_latency for r in runs]),
+            "precision":_mean([r.score_precision for r in runs]),
+            "recall":_mean([r.score_recall for r in runs])},
+        "latency_ms":{"p50":_pct(lats,50),"p95":_pct(lats,95),
+            "mean":round(sum(lats)/len(lats),1) if lats else None},
+        "per_case":[{"case_id":str(r.case_id),
+            "title":next((c.title for c in cases if c.id==r.case_id),""),
+            "latency_ms":r.latency_ms,"accuracy":r.score_accuracy,
+            "groundedness":r.score_groundedness,"hallucination":r.score_hallucination,
+            "precision":r.score_precision,"recall":r.score_recall,
+            "latency_score":r.score_latency,"error":r.error,
+            "run_at":r.run_at.isoformat() if r.run_at else None} for r in runs]}

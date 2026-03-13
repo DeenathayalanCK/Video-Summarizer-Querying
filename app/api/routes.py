@@ -197,15 +197,10 @@ def get_mode():
 
 @router.post("/ask", response_model=AskResponse)
 def ask(body: AskRequest, db: Session = Depends(get_db)):
-    from app.rag.fast_path import try_fast_path
+    # NOTE: fast-path + curation are handled inside QAEngine.ask() / stream_ask().
+    # Do NOT call try_fast_path() here — doing so returns raw DB facts directly
+    # without the LLM curation step, bypassing the clean natural-language answer.
     from app.vision.window_manager import WindowManager
-    fast = try_fast_path(db, body.question, body.video_filename)
-    if fast.get("answered"):
-        return AskResponse(
-            question=body.question,
-            answer=fast["answer"],
-            sources=fast.get("sources", []),
-        )
     engine = QAEngine(db)
     wm = WindowManager.get_instance()
     try:
@@ -229,55 +224,64 @@ def ask(body: AskRequest, db: Session = Depends(get_db)):
         sources=result["sources"],
     )
 @router.post("/ask-stream")
-def ask_stream(body: AskRequest, db: Session = Depends(get_db)):
+def ask_stream(body: AskRequest):
     """
     Streaming version of /ask. Returns a Server-Sent Events stream.
     Each event is: data: {"token": "..."} or data: {"done": true, "sources": [...]}
-    Fast-path queries (plate, count, presence, behaviour) return immediately
-    without calling the LLM at all.
 
-    The Ollama semaphore from WindowManager is acquired for the LLM portion only.
-    Fast-path answers bypass it entirely (no Ollama call).
-    This prevents Ask QA from competing with pipeline summary/attributes on the
-    CPU Ollama runner. Both lanes use 2048 KV cache. On 24GB RAM both can run
-    simultaneously without OOM, but serialising prevents CPU thrashing.
+    All requests — including fast-path (plate, count, presence, behaviour) —
+    go through QAEngine.stream_ask() which handles fast-path + LLM curation
+    as a single pipeline. The LLM curate step rewrites raw DB facts into a
+    clean natural-language answer before streaming tokens to the client.
+
+    The Ollama semaphore is always acquired (fast-path curate also calls Ollama),
+    which prevents Ask QA from competing with pipeline summary/attributes on the
+    CPU Ollama runner.
+
+    NOTE: The DB session is created and closed *inside* the generator so the
+    connection is returned to the pool as soon as streaming finishes.  Using
+    Depends(get_db) here would keep the session open for the entire HTTP
+    connection lifetime and exhaust the connection pool under load.
     """
-    engine = QAEngine(db)
 
     def generate():
-        # Fast-path: no Ollama call needed — stream immediately without sem
-        from app.rag.fast_path import try_fast_path
-        from app.vision.window_manager import WindowManager, OllamaLaneBusyError
-        import json as _json
-        fast = try_fast_path(db, body.question, body.video_filename)
-        if fast.get("answered"):
-            yield f"data: {_json.dumps({'token': fast['answer']})}\n\n"
-            yield f"data: {_json.dumps({'done': True, 'sources': fast.get('sources', []), 'fast_path': True})}\n\n"
-            return
-
-        # LLM path: Ask traffic uses its own Ollama lane so background window
-        # post-processing is queued independently instead of being dropped.
-        # OllamaLaneBusyError is raised if pipeline holds the lock past the timeout.
-        wm = WindowManager.get_instance()
+        # Each streaming request owns its own short-lived session.
+        db = SessionLocal()
         try:
-            yield f"data: {_json.dumps({'waiting': True})}\n\n"
-            with wm.ask_ollama_ctx():
-                yield f"data: {_json.dumps({'thinking': True})}\n\n"
-                yield from engine.stream_ask(
-                    question=body.question,
-                    video_filename=body.video_filename,
-                    camera_id=body.camera_id,
-                    min_second=body.min_second,
-                    max_second=body.max_second,
-                )
-        except OllamaLaneBusyError as e:
-            msg = str(e)
-            yield f"data: {_json.dumps({'token': msg})}\n\n"
-            yield f"data: {_json.dumps({'done': True, 'sources': [], 'error': 'busy', 'error_message': msg})}\n\n"
-        except Exception as e:
-            msg = f"Ask failed: {type(e).__name__}: {e}"
-            yield f"data: {_json.dumps({'token': msg})}\n\n"
-            yield f"data: {_json.dumps({'done': True, 'sources': [], 'error': 'exception'})}\n\n" 
+            from app.vision.window_manager import WindowManager, OllamaLaneBusyError
+            import json as _json
+
+            engine = QAEngine(db)
+
+            # NOTE: Do NOT call try_fast_path() here. stream_ask() handles the
+            # full fast-path + LLM curation pipeline internally. Calling
+            # try_fast_path() here and returning early bypasses curation entirely,
+            # sending raw DB facts directly to the user instead of a clean answer.
+            #
+            # The Ollama semaphore is still needed for the LLM path (both fast-path
+            # curate and full detection path call Ollama).
+            wm = WindowManager.get_instance()
+            try:
+                yield f"data: {_json.dumps({'waiting': True})}\n\n"
+                with wm.ask_ollama_ctx():
+                    yield f"data: {_json.dumps({'thinking': True})}\n\n"
+                    yield from engine.stream_ask(
+                        question=body.question,
+                        video_filename=body.video_filename,
+                        camera_id=body.camera_id,
+                        min_second=body.min_second,
+                        max_second=body.max_second,
+                    )
+            except OllamaLaneBusyError as e:
+                msg = str(e)
+                yield f"data: {_json.dumps({'token': msg})}\n\n"
+                yield f"data: {_json.dumps({'done': True, 'sources': [], 'error': 'busy', 'error_message': msg})}\n\n"
+            except Exception as e:
+                msg = f"Ask failed: {type(e).__name__}: {e}"
+                yield f"data: {_json.dumps({'token': msg})}\n\n"
+                yield f"data: {_json.dumps({'done': True, 'sources': [], 'error': 'exception'})}\n\n"
+        finally:
+            db.close()
 
     return StreamingResponse(
         generate(),
@@ -421,14 +425,10 @@ def list_videos(db: Session = Depends(get_db)):
     )
 
     summaries = {s.video_filename for s in db.query(VideoSummary.video_filename).all()}
-    statuses = {
-        s.video_filename: s.status
-        for s in db.query(ProcessingStatus).all()
-    }
-    phase_6b = {
-        s.video_filename: bool(s.phase_6b_completed)
-        for s in db.query(ProcessingStatus).all()
-    }
+    # FIX: single query for ProcessingStatus instead of two identical queries
+    _ps_rows = db.query(ProcessingStatus).all()
+    statuses = {s.video_filename: s.status for s in _ps_rows}
+    phase_6b = {s.video_filename: bool(s.phase_6b_completed) for s in _ps_rows}
 
     # Union of all known video filenames
     all_videos = set(det_counts) | set(caption_counts) | set(statuses)

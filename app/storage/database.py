@@ -9,10 +9,10 @@ settings = get_settings()
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
-    pool_recycle=1800,   # recycle connections every 30 min (avoids stale-conn drops)
-    pool_timeout=30,     # raise after 30 s waiting for a free connection
-    pool_size=5,
-    max_overflow=10,
+    pool_recycle=1800,
+    pool_timeout=30,
+    pool_size=20,        # live mode: postprocess thread (1) + pipeline workers (up to 4)
+    max_overflow=30,     # burst: UI polling + ask SSE + attribute sessions
 )
 
 SessionLocal = sessionmaker(

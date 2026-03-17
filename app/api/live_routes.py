@@ -479,3 +479,51 @@ def _make_placeholder_frame() -> bytes:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (60, 60, 60), 1)
     ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 60])
     return bytes(buf) if ok else b""
+
+@router.get("/combined")
+def live_combined(db: Session = Depends(get_db)):
+    """
+    Combined live state endpoint — replaces calling /status + /sessions + /active separately.
+    Returns all three in one DB round-trip to reduce connection pool pressure during live mode.
+    """
+    from app.vision.live_stream_processor import LiveStreamProcessor
+    proc = LiveStreamProcessor.get_instance()
+    active = proc.get_active_tracks()
+
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # All DB queries in single session
+    today_count     = db.query(PersonSession).filter(PersonSession.entry_time >= today_start).count()
+    total_identities = db.query(PersonIdentity).count()
+
+    sessions = (
+        db.query(PersonSession)
+        .filter(PersonSession.entry_time >= today_start)
+        .order_by(PersonSession.entry_time.desc())
+        .limit(20)
+        .all()
+    )
+
+    return {
+        # /status fields
+        "running":           proc.is_running,
+        "active_persons":    len([t for t in active if t["active"]]),
+        "total_identities":  total_identities,
+        "sessions_today":    today_count,
+        "frame_age_seconds": round(proc.frame_buffer.age(), 1),
+        # /active fields
+        "active_tracks":     active,
+        # /sessions fields
+        "sessions": [
+            {
+                "id":           s.id,
+                "person_label": s.person_label,
+                "entry_time":   s.entry_time.strftime("%I:%M:%S %p") if s.entry_time else None,
+                "exit_time":    s.exit_time.strftime("%I:%M:%S %p")  if s.exit_time  else None,
+                "duration":     f"{int(s.duration_seconds)}s"         if s.duration_seconds else None,
+                "last_state":   s.last_state,
+                "crop_path":    s.best_crop_path,
+            }
+            for s in sessions
+        ],
+    }

@@ -1261,7 +1261,7 @@
             );
           document.getElementById("live-dot-pulse")?.classList.remove("hidden");
           _livePoll();
-          _livePollTimer = setInterval(_livePoll, 3000);
+          _livePollTimer = setInterval(_livePoll, 5000);
           // Refresh windows sidebar every 30s in live mode
           setInterval(refreshSidebar, 30000);
         }
@@ -3798,7 +3798,7 @@
 
         // Start polling for active persons + sessions
         _livePoll();
-        _livePollTimer = setInterval(_livePoll, 3000);
+        _livePollTimer = setInterval(_livePoll, 5000);
       }
 
       async function liveStop() {
@@ -3834,22 +3834,35 @@
 
       async function _livePoll() {
         try {
+          // Single combined endpoint replaces /active + /sessions + /status
+          // — reduces DB connection pool pressure during post-processing
+          const combined = await apiFetch("/live/combined");
+
           // Active persons (sidebar cards)
-          const activeData = await apiFetch("/live/active");
-          _renderPersonCards(activeData.persons || []);
+          _renderPersonCards(
+            combined.active_tracks
+              ? combined.active_tracks
+                  .filter((t) => t.active)
+                  .map((t) => ({
+                    person_label: t.person_label || t.label,
+                    last_state: t.state,
+                    crop_path: t.crop_path,
+                    entry_time: t.entry_time,
+                    active: t.active,
+                  }))
+              : [],
+          );
           document.getElementById("live-active-count").textContent =
-            activeData.count || 0;
+            combined.active_persons || 0;
 
           // Today's sessions (table)
-          const sessData = await apiFetch("/live/sessions");
-          _renderSessionTable(sessData.sessions || []);
+          _renderSessionTable(combined.sessions || []);
 
           // Status bar
-          const st = await apiFetch("/live/status");
           document.getElementById("live-status-bar").innerHTML =
-            `<span class="text-gray-400">${st.sessions_today} sessions today</span>` +
-            `&nbsp;·&nbsp;<span class="text-gray-500">${st.total_identities} known persons</span>` +
-            (st.running
+            `<span class="text-gray-400">${combined.sessions_today} sessions today</span>` +
+            `&nbsp;·&nbsp;<span class="text-gray-500">${combined.total_identities} known persons</span>` +
+            (combined.running
               ? `&nbsp;·&nbsp;<span class="text-emerald-500">● live</span>`
               : `&nbsp;·&nbsp;<span class="text-gray-600">● offline</span>`);
 
@@ -4053,7 +4066,7 @@
       window.addEventListener("load", () => {
         document.getElementById("tab-live").addEventListener("click", () => {
           if (_liveRunning && !_livePollTimer) {
-            _livePollTimer = setInterval(_livePoll, 3000);
+            _livePollTimer = setInterval(_livePoll, 5000);
           }
           _livePoll();
         });

@@ -74,6 +74,90 @@ _CARRYING_KEYWORDS = {
 }
 
 
+# ── Time-range helpers ───────────────────────────────────────────────────────
+
+_MONTH_MAP = {
+    "jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
+    "jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12,
+    "january":1,"february":2,"march":3,"april":4,"june":6,
+    "july":7,"august":8,"september":9,"october":10,"november":11,"december":12,
+}
+
+
+def _parse_time_range(q: str):
+    """
+    Extract a UTC epoch [min, max) range and matching window-name suffixes
+    from a natural-language question like "Mar 13 between 10:30-10:40".
+
+    Returns (min_epoch, max_epoch, window_suffixes: list[str]) or None.
+    window_suffixes is a list of "YYYYMMDD_HHMM" strings that overlap the range
+    (one per 5-minute boundary inside [start, end)).
+    """
+    import datetime as _dt
+    q_lower = q.lower()
+
+    # ── Date extraction ───────────────────────────────────────────────────────
+    year = _dt.datetime.now(_dt.timezone.utc).year
+    month = day = None
+
+    m = re.search(r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec\w*)\s+(\d{1,2})\b', q_lower)
+    if m:
+        month = _MONTH_MAP.get(m.group(1)[:3])
+        day   = int(m.group(2))
+    else:
+        m = re.search(r'\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec\w*)\b', q_lower)
+        if m:
+            day   = int(m.group(1))
+            month = _MONTH_MAP.get(m.group(2)[:3])
+    if not month:
+        m = re.search(r'\b(\d{1,2})[/-](\d{1,2})\b', q)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a <= 12 and b <= 31:
+                month, day = a, b
+            elif b <= 12 and a <= 31:
+                day, month = a, b
+
+    # ── Time range extraction ─────────────────────────────────────────────────
+    times = re.findall(r'(\d{1,2}):(\d{2})', q)
+    if len(times) < 2:
+        return None
+    t_start = (int(times[0][0]), int(times[0][1]))
+    t_end   = (int(times[1][0]), int(times[1][1]))
+
+    if not (month and day):
+        return None
+
+    try:
+        # Times in questions are in IST (UTC+5:30) — the UI, filenames, and
+        # display all use IST.  Convert to UTC epoch for DB comparison.
+        IST_OFFSET = _dt.timedelta(hours=5, minutes=30)
+        tz  = _dt.timezone.utc
+        dts_ist = _dt.datetime(year, month, day, t_start[0], t_start[1])
+        dte_ist = _dt.datetime(year, month, day, t_end[0],   t_end[1])
+        dts = (dts_ist - IST_OFFSET).replace(tzinfo=tz)   # IST → UTC
+        dte = (dte_ist - IST_OFFSET).replace(tzinfo=tz)   # IST → UTC
+    except ValueError:
+        return None
+
+    # Build 5-min window suffixes that overlap [dts, dte)
+    suffixes = []
+    cur = dts.replace(minute=(dts.minute // 5) * 5, second=0, microsecond=0)
+    while cur < dte:
+        suffixes.append(cur.strftime('%Y%m%d_%H%M'))
+        cur += _dt.timedelta(minutes=5)
+
+    return dts.timestamp(), dte.timestamp(), suffixes
+
+
+def _filter_events_by_time(events: list, min_epoch: float, max_epoch: float) -> list:
+    """Keep only events whose track overlaps the given epoch range."""
+    return [
+        ev for ev in events
+        if ev.first_seen_second < max_epoch and ev.last_seen_second >= min_epoch
+    ]
+
+
 def _fmt(s: float) -> str:
     """Format a timestamp for display.
 
@@ -101,12 +185,23 @@ def _detect_class(q: str) -> Optional[str]:
     return None
 
 
-def _entry_events(db: Session, video_filename: Optional[str], obj_class: Optional[str]) -> list:
+def _entry_events(
+    db: Session,
+    video_filename: Optional[str],
+    obj_class: Optional[str],
+    min_second: Optional[float] = None,
+    max_second: Optional[float] = None,
+) -> list:
     q = db.query(TrackEvent).filter(TrackEvent.event_type == "entry")
     if video_filename:
         q = q.filter(TrackEvent.video_filename == video_filename)
     if obj_class:
         q = q.filter(TrackEvent.object_class == obj_class)
+    # Apply time range filter when provided (epoch seconds in first_seen_second)
+    if min_second is not None:
+        q = q.filter(TrackEvent.last_seen_second >= min_second)
+    if max_second is not None:
+        q = q.filter(TrackEvent.first_seen_second < max_second)
     return q.order_by(TrackEvent.first_seen_second).all()
 
 
@@ -133,7 +228,7 @@ def _source_from_event(ev: TrackEvent) -> dict:
 
 # ── Resolvers ────────────────────────────────────────────────────────────────
 
-def _resolve_plate(db, q: str, video_filename: Optional[str]) -> dict:
+def _resolve_plate(db, q: str, video_filename: Optional[str], min_second: Optional[float] = None, max_second: Optional[float] = None) -> dict:
     """Answer 'is there a car with plate X?' directly from attributes."""
     # Extract digits/letters that look like a plate fragment
     # Match things like "7272", "TN09", "AB1234"
@@ -143,7 +238,7 @@ def _resolve_plate(db, q: str, video_filename: Optional[str]) -> dict:
                   "WHAT","WAS","THERE","PLATE","NUMBER","CONTAINS","IN","IT"}
     plate_fragments = [f for f in plate_fragments if f not in stop_upper]
 
-    events = _entry_events(db, video_filename, None)
+    events = _entry_events(db, video_filename, None, min_second, max_second)
     vehicle_classes = {"car","truck","bus","motorcycle","bicycle"}
 
     matches = []
@@ -207,42 +302,54 @@ def _resolve_plate(db, q: str, video_filename: Optional[str]) -> dict:
     return {"answered": True, "answer": "\n".join(lines), "sources": sources}
 
 
-def _resolve_count(db, q: str, video_filename: Optional[str]) -> dict:
+def _resolve_count(db, q: str, video_filename: Optional[str], min_second: Optional[float] = None, max_second: Optional[float] = None) -> dict:
     """Answer 'how many X' by counting unique track IDs."""
     obj_class = _detect_class(q)
-    events = _entry_events(db, video_filename, obj_class)
+    events = _entry_events(db, video_filename, obj_class, min_second, max_second)
 
     if not events:
         cls_str = obj_class or "objects"
+        time_ctx = ""
+        if min_second is not None and max_second is not None:
+            import datetime as _dt
+            ts = _dt.datetime.fromtimestamp(min_second, tz=_dt.timezone.utc).strftime("%H:%M")
+            te = _dt.datetime.fromtimestamp(max_second, tz=_dt.timezone.utc).strftime("%H:%M")
+            time_ctx = f" between {ts}–{te}"
         return {
             "answered": True,
-            "answer": f"No {cls_str} were detected in the footage.",
+            "answer": f"No {cls_str} were detected{time_ctx}.",
             "sources": [],
         }
 
-    # Group by video
+    # Total across all matching windows/videos
+    total = len(events)
+    cls_str = obj_class or "unique objects"
+
+    # Build a time-range header when a range was applied
+    time_header = ""
+    if min_second is not None and max_second is not None:
+        import datetime as _dt
+        ts = _dt.datetime.fromtimestamp(min_second, tz=_dt.timezone.utc).strftime("%H:%M")
+        te = _dt.datetime.fromtimestamp(max_second, tz=_dt.timezone.utc).strftime("%H:%M")
+        time_header = f"Between {ts}–{te}: "
+
+    # Group by video — but cap at 5 windows to keep raw_facts compact for curation
     by_video: dict = {}
     for ev in events:
         by_video.setdefault(ev.video_filename, []).append(ev)
 
-    lines = []
+    lines = [f"{time_header}**{total}** {cls_str}(s) detected across {len(by_video)} window(s)."]
     sources = []
-    for vf, evs in sorted(by_video.items()):
-        cls_str = obj_class or "unique objects"
-        lines.append(f"**{len(evs)}** {cls_str}(s) detected in `{vf}`.")
-        # Breakdown by class if no class filter
-        if not obj_class:
-            class_counts: dict = {}
-            for ev in evs:
-                class_counts[ev.object_class] = class_counts.get(ev.object_class, 0) + 1
-            breakdown = ", ".join(f"{v} {k}" for k, v in sorted(class_counts.items()))
-            lines.append(f"  Breakdown: {breakdown}")
-        sources.extend(_source_from_event(ev) for ev in evs[:3])
+    for vf, evs in sorted(by_video.items())[:5]:   # cap: 5 windows max in raw_facts
+        lines.append(f"  {len(evs)} in `{vf}`")
+        sources.extend(_source_from_event(ev) for ev in evs[:2])
+    if len(by_video) > 5:
+        lines.append(f"  ... and {len(by_video) - 5} more window(s)")
 
     return {"answered": True, "answer": "\n".join(lines), "sources": sources[:6]}
 
 
-def _resolve_presence(db, q: str, video_filename: Optional[str]) -> dict:
+def _resolve_presence(db, q: str, video_filename: Optional[str], min_second: Optional[float] = None, max_second: Optional[float] = None) -> dict:
     """Answer 'was there a X / did anyone X' quickly.
 
     Open-ended questions like 'was there anything suspicious?' must NOT be
@@ -265,7 +372,7 @@ def _resolve_presence(db, q: str, video_filename: Optional[str]) -> dict:
     if not obj_class and not video_filename:
         return {"answered": False}
 
-    events = _entry_events(db, video_filename, obj_class)
+    events = _entry_events(db, video_filename, obj_class, min_second, max_second)
 
     if not events:
         cls_str = obj_class or "the object"
@@ -355,10 +462,10 @@ def _resolve_behaviour(db, q: str, video_filename: Optional[str]) -> dict:
     return {"answered": True, "answer": "\n\n".join(lines), "sources": sources}
 
 
-def _resolve_when(db, q: str, video_filename: Optional[str]) -> dict:
+def _resolve_when(db, q: str, video_filename: Optional[str], min_second: Optional[float] = None, max_second: Optional[float] = None) -> dict:
     """Answer 'when did X enter/leave?' from track timestamps."""
     obj_class = _detect_class(q)
-    events = _entry_events(db, video_filename, obj_class)
+    events = _entry_events(db, video_filename, obj_class, min_second, max_second)
 
     if not events:
         return {"answered": True,
@@ -382,7 +489,7 @@ def _resolve_when(db, q: str, video_filename: Optional[str]) -> dict:
     }
 
 
-def _resolve_identity(db, q: str, video_filename: Optional[str]) -> dict:
+def _resolve_identity(db, q: str, video_filename: Optional[str], min_second: Optional[float] = None, max_second: Optional[float] = None) -> dict:
     """Answer 'what colour is X / what was person wearing' from attributes.
     
     Bug fix: When video_filename is None (All videos), old code returned
@@ -392,7 +499,7 @@ def _resolve_identity(db, q: str, video_filename: Optional[str]) -> dict:
     Also uses Tier-1 CV color fields (clothing_top_color/bottom_color) as fallback.
     """
     obj_class = _detect_class(q)
-    events = _entry_events(db, video_filename, obj_class)
+    events = _entry_events(db, video_filename, obj_class, min_second, max_second)
 
     if not events:
         return {"answered": False}
@@ -483,7 +590,7 @@ def _resolve_identity(db, q: str, video_filename: Optional[str]) -> dict:
     }
 
 
-def _resolve_carrying(db, q: str, video_filename: Optional[str]) -> dict:
+def _resolve_carrying(db, q: str, video_filename: Optional[str], min_second: Optional[float] = None, max_second: Optional[float] = None) -> dict:
     """
     Answer 'is there anyone with a backpack / bag / luggage?' type questions.
 
@@ -513,6 +620,10 @@ def _resolve_carrying(db, q: str, video_filename: Optional[str]) -> dict:
     q_db = db.query(_TE).filter(_TE.event_type == "entry")
     if video_filename:
         q_db = q_db.filter(_TE.video_filename == video_filename)
+    if min_second is not None:
+        q_db = q_db.filter(_TE.last_seen_second >= min_second)
+    if max_second is not None:
+        q_db = q_db.filter(_TE.first_seen_second < max_second)
     all_entry_events = q_db.order_by(_TE.first_seen_second).all()
 
     keywords_for_type = _CARRYING_KEYWORDS[carrying_type]
@@ -562,9 +673,15 @@ def try_fast_path(
     db: Session,
     question: str,
     video_filename: Optional[str] = None,
+    min_second: Optional[float] = None,
+    max_second: Optional[float] = None,
 ) -> dict:
     """
     Try to answer the question directly from the database.
+
+    min_second / max_second are Unix epoch floats that gate which TrackEvents
+    are considered.  If not supplied, they are parsed from the question text
+    (e.g. "Mar 13 between 10:30-10:40").
 
     Returns:
       {"answered": True,  "answer": "...", "sources": [...], "fast_path_type": "..."}
@@ -572,10 +689,27 @@ def try_fast_path(
     """
     q = question.strip()
 
+    # ── Auto-detect time range from question if not provided by caller ─────────
+    _time_range = _parse_time_range(q)
+    if _time_range:
+        _min_e, _max_e, _win_suffixes = _time_range
+        # Only override caller values if they weren't explicitly supplied
+        if min_second is None:
+            min_second = _min_e
+        if max_second is None:
+            max_second = _max_e
+        # If no specific video selected, narrow to matching windows only
+        if video_filename is None and _win_suffixes:
+            # We'll pass this through to resolvers via the min/max epoch filter
+            # (window names embed the time, so filtering by first_seen_second
+            # already scopes to the right windows — no extra join needed)
+            pass
+    _log.info("fast_path_time_range", min=min_second, max=max_second, question=q)
+
     # Plate query — highest priority, very specific
     if _match(_PLATE_PATTERNS, q):
         _log.info("fast_path_triggered", type="plate", question=q)
-        result = _resolve_plate(db, q, video_filename)
+        result = _resolve_plate(db, q, video_filename, min_second, max_second)
         if result["answered"]:
             result["fast_path_type"] = "plate"
             return result
@@ -591,7 +725,7 @@ def try_fast_path(
     # Count query
     if _match(_COUNT_PATTERNS, q):
         _log.info("fast_path_triggered", type="count", question=q)
-        result = _resolve_count(db, q, video_filename)
+        result = _resolve_count(db, q, video_filename, min_second, max_second)
         if result["answered"]:
             result["fast_path_type"] = "count"
             return result
@@ -599,7 +733,7 @@ def try_fast_path(
     # When/time query
     if _match(_WHEN_PATTERNS, q):
         _log.info("fast_path_triggered", type="when", question=q)
-        result = _resolve_when(db, q, video_filename)
+        result = _resolve_when(db, q, video_filename, min_second, max_second)
         if result["answered"]:
             result["fast_path_type"] = "when"
             return result
@@ -607,7 +741,7 @@ def try_fast_path(
     # Identity/appearance query
     if _match(_IDENTITY_PATTERNS, q):
         _log.info("fast_path_triggered", type="identity", question=q)
-        result = _resolve_identity(db, q, video_filename)
+        result = _resolve_identity(db, q, video_filename, min_second, max_second)
         if result["answered"]:
             result["fast_path_type"] = "identity"
             return result
@@ -618,7 +752,7 @@ def try_fast_path(
                          "luggage", "suitcase", "briefcase", "carrying"]
     if any(k in q.lower() for k in carrying_keywords):
         _log.info("fast_path_triggered", type="carrying", question=q)
-        result = _resolve_carrying(db, q, video_filename)
+        result = _resolve_carrying(db, q, video_filename, min_second, max_second)
         if result["answered"]:
             result["fast_path_type"] = "carrying"
             return result
@@ -626,7 +760,7 @@ def try_fast_path(
     # Presence query — simple yes/no
     if _match(_PRESENCE_PATTERNS, q):
         _log.info("fast_path_triggered", type="presence", question=q)
-        result = _resolve_presence(db, q, video_filename)
+        result = _resolve_presence(db, q, video_filename, min_second, max_second)
         if result["answered"]:
             result["fast_path_type"] = "presence"
             return result

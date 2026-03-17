@@ -352,24 +352,121 @@ class QAEngine:
         from app.storage.models import DetectedObject
         return self.db.query(DetectedObject).first() is not None
 
+    @staticmethod
+    def _is_already_clean(raw_facts: str) -> bool:
+        """
+        Returns True when raw_facts is already a clean, readable sentence and
+        does NOT need to be sent to the LLM for curation.
+
+        Criteria:
+        - Single line (no newlines)
+        - No markdown bold (**) or backticks  (those indicate structured DB output)
+        - Under 160 chars (a full natural-language sentence)
+
+        This skips the Ollama curate call entirely for simple "No X detected"
+        answers, avoiding the 25s timeout on an already-clean result.
+        """
+        stripped = raw_facts.strip()
+        return (
+            "\n" not in stripped
+            and "**" not in stripped
+            and "`" not in stripped
+            and len(stripped) < 160
+        )
+
+    def _curate_fast_path_sync(self, raw_facts: str, question: str) -> str:
+        """
+        Synchronous version of the fast-path curation step used by _ask_detection.
+
+        Sends the raw DB facts + user question to the LLM with a tiny prompt
+        (~200 tokens) so it rewrites them into a clean, natural-language answer.
+        Falls back to a summarised form of raw_facts if Ollama is unavailable or
+        times out — never dumps verbose multi-line raw data directly to the user.
+
+        Safety cap: raw_facts is truncated to 600 chars before building the
+        curate prompt.  Time-filtered queries should never produce more than a
+        few lines; if they do (e.g. a broad "all videos" count with no time
+        range) we still cap rather than send thousands of tokens that will OOM
+        the model or time out.
+        """
+        # Skip curate entirely if raw_facts is already a clean readable sentence
+        # (e.g. "No person were detected between 10:30–10:40.")
+        if self._is_already_clean(raw_facts):
+            self.logger.info("fast_path_curate_skipped_already_clean")
+            return raw_facts.strip()
+
+        # Hard cap on raw_facts fed to curate — prevents timeout on large blobs
+        _MAX_RAW = 600
+        raw_facts_capped = raw_facts[:_MAX_RAW]
+        if len(raw_facts) > _MAX_RAW:
+            raw_facts_capped += f"\n... ({len(raw_facts) - _MAX_RAW} chars truncated)"
+            self.logger.warning(
+                "fast_path_curate_raw_facts_capped",
+                original_len=len(raw_facts),
+                cap=_MAX_RAW,
+            )
+
+        curate_prompt = FAST_PATH_CURATE_TEMPLATE.format(
+            raw_facts=raw_facts_capped,
+            question=question,
+        )
+        try:
+            with OllamaCallTimer(
+                call_type="ask",
+                model=self.model,
+                prompt=curate_prompt[:800],
+            ) as _ct:
+                resp = requests.post(
+                    f"{self.settings.ollama_host}/api/generate",
+                    json={
+                        "model": self.model,
+                        "system": FAST_PATH_CURATE_SYSTEM,
+                        "prompt": curate_prompt,
+                        "stream": False,
+                        "options": {"num_ctx": 512, "num_predict": 150},
+                    },
+                    timeout=(10, 25),   # curate prompt is tiny; >25s means Ollama is stuck
+                )
+                resp.raise_for_status()
+                curated = resp.json().get("response", "").strip()
+                _ct.response = curated[:500]
+                if curated:
+                    return curated
+        except Exception as _e:
+            self.logger.warning("fast_path_curate_sync_failed", error=str(_e))
+        # Fallback: return first 2 lines of raw_facts (not the whole blob)
+        first_lines = "\n".join(raw_facts.splitlines()[:3])
+        return first_lines if first_lines else raw_facts[:200]
+
     def _ask_detection(self, question, video_filename=None, camera_id=None,
                        min_second=None, max_second=None):
 
-        # ── Fast-path: answer directly from DB if possible ────────────────────
-        # Skips LLM entirely for factual queries (plate, count, presence, etc.)
-        # Response time: <100ms vs 2-7 minutes for LLM path
-        fast = try_fast_path(self.db, question, video_filename)
+        # ── Fast-path: answer from DB, then curate via LLM ──────────────────
+        # DB query gives raw structured facts in <100ms; the LLM curate step
+        # rewrites them into a natural-language answer (~3-8s, tiny prompt).
+        # This is far faster than the full detection pipeline (2-7 min) while
+        # still giving the user a clean, readable response with evidence.
+        fast = try_fast_path(self.db, question, video_filename, min_second, max_second)
         if fast.get("answered"):
             self.logger.info(
                 "qa_fast_path_answered",
                 fast_path_type=fast.get("fast_path_type"),
                 question=question,
             )
+            curated = self._curate_fast_path_sync(
+                raw_facts=fast["answer"],
+                question=question,
+            )
             return {
-                "answer": fast["answer"],
+                "answer": curated,
                 "sources": fast.get("sources", []),
                 "fast_path": True,
                 "fast_path_type": fast.get("fast_path_type"),
+                "db_evidence": {
+                    "raw_answer": fast["answer"],
+                    "fast_path_type": fast.get("fast_path_type"),
+                    "sources": fast.get("sources", []),
+                },
             }
 
         # ── PASS 1: Temporal / focused retrieval ──────────────────────────────
@@ -557,7 +654,7 @@ class QAEngine:
             return f"data: {_json.dumps(obj)}\n\n"
 
         # ── Fast-path: answer from DB in <100ms ───────────────────────────────
-        fast = try_fast_path(self.db, question, video_filename)
+        fast = try_fast_path(self.db, question, video_filename, min_second, max_second)
         if fast.get("answered"):
             self.logger.info("qa_stream_fast_path", type=fast.get("fast_path_type"))
             raw_answer  = fast["answer"]
@@ -565,51 +662,69 @@ class QAEngine:
             fp_type     = fast.get("fast_path_type", "db")
 
             # ── Curate: send raw DB facts + question to LLM ──────────────────
-            # The prompt is tiny (~200 tokens) so this is fast (~3-8s).
-            curate_prompt = FAST_PATH_CURATE_TEMPLATE.format(
-                raw_facts=raw_answer,
-                question=question,
-            )
-            curated_tokens = []
-            t_curate_start = _time.monotonic()
-            try:
-                with OllamaCallTimer(
-                    call_type="ask",
-                    model=self.model,
-                    prompt=curate_prompt[:800],
-                ) as _ct:
-                    resp = requests.post(
-                        f"{self.settings.ollama_host}/api/generate",
-                        json={
-                            "model": self.model,
-                            "system": FAST_PATH_CURATE_SYSTEM,
-                            "prompt": curate_prompt,
-                            "stream": True,
-                            "options": {"num_ctx": 1024, "num_predict": 150},
-                        },
-                        stream=True,
-                        timeout=(10, 60),
+            # Skip curate entirely if raw_facts is already a clean readable sentence
+            # (single line, no markdown, <160 chars). Avoids 25s Ollama timeout
+            # for simple "No X detected" answers that need no rewriting.
+            t_curate_start = _time.monotonic()   # defined here for elapsed calc below
+            if self._is_already_clean(raw_answer):
+                self.logger.info("stream_fast_path_curate_skipped_already_clean")
+                yield _sse({"token": raw_answer.strip()})
+            else:
+                # Hard cap on raw_facts fed to curate — prevents timeout on large blobs.
+                _MAX_RAW = 600
+                raw_answer_capped = raw_answer[:_MAX_RAW]
+                if len(raw_answer) > _MAX_RAW:
+                    raw_answer_capped += f"\n... ({len(raw_answer) - _MAX_RAW} chars truncated)"
+                    self.logger.warning(
+                        "stream_curate_raw_facts_capped",
+                        original_len=len(raw_answer),
+                        cap=_MAX_RAW,
                     )
-                    resp.raise_for_status()
-                    import json as _jfp
-                    for line in resp.iter_lines():
-                        if not line:
-                            continue
-                        try:
-                            chunk = _jfp.loads(line)
-                        except Exception:
-                            continue
-                        token = chunk.get("response", "")
-                        if token:
-                            curated_tokens.append(token)
-                            yield _sse({"token": token})
-                        if chunk.get("done"):
-                            break
-                    _ct.response = "".join(curated_tokens)[:500]
-            except Exception as _fe:
-                self.logger.warning("fast_path_curate_failed", error=str(_fe))
-                # Fallback: stream the raw answer directly
-                yield _sse({"token": raw_answer})
+
+                curate_prompt = FAST_PATH_CURATE_TEMPLATE.format(
+                    raw_facts=raw_answer_capped,
+                    question=question,
+                )
+                curated_tokens = []
+                try:
+                    with OllamaCallTimer(
+                        call_type="ask",
+                        model=self.model,
+                        prompt=curate_prompt[:800],
+                    ) as _ct:
+                        resp = requests.post(
+                            f"{self.settings.ollama_host}/api/generate",
+                            json={
+                                "model": self.model,
+                                "system": FAST_PATH_CURATE_SYSTEM,
+                                "prompt": curate_prompt,
+                                "stream": True,
+                                "options": {"num_ctx": 512, "num_predict": 150},
+                            },
+                            stream=True,
+                            timeout=(10, 25),   # curate prompt is tiny; >25s means Ollama is stuck
+                        )
+                        resp.raise_for_status()
+                        import json as _jfp
+                        for line in resp.iter_lines():
+                            if not line:
+                                continue
+                            try:
+                                chunk = _jfp.loads(line)
+                            except Exception:
+                                continue
+                            token = chunk.get("response", "")
+                            if token:
+                                curated_tokens.append(token)
+                                yield _sse({"token": token})
+                            if chunk.get("done"):
+                                break
+                        _ct.response = "".join(curated_tokens)[:500]
+                except Exception as _fe:
+                    self.logger.warning("fast_path_curate_failed", error=str(_fe))
+                    # Fallback: stream first 3 lines only (not the full raw blob)
+                    fallback = "\n".join(raw_answer.splitlines()[:3])
+                    yield _sse({"token": fallback if fallback else raw_answer[:200]})
 
             curate_elapsed_ms = (_time.monotonic() - t_curate_start) * 1000
 

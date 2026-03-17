@@ -133,5 +133,5 @@ RAW FACTS FROM DATABASE:
 
 USER QUESTION: {question}
 
-Write a clear, concise answer based only on the facts above.
+Write a clear, concise answer to the user's question based only on the facts above.
 """
